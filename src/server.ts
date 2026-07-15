@@ -21,6 +21,7 @@ const app = Fastify({
 });
 
 await app.register(cors, {
+  credentials: true,
   origin(origin, callback) {
     if (!origin || corsOrigins.has(origin)) return callback(null, true);
     callback(new Error("Origin is not allowed"), false);

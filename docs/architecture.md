@@ -9,7 +9,7 @@ Bank API gateway / WAF
         |
         v
 bank-letta-agent-service (one public API contract)
-  |-- authentication adapter (demo: X-User-Id)
+  |-- authentication adapter (demo: server-side sessions; production: bank SSO/OIDC)
   |-- PostgreSQL ownership + conversation + audit records
   |-- Redis conversation locks + global model semaphore
   |-- Letta Agent SDK, backend=local
@@ -24,6 +24,7 @@ bank-letta-agent-service (one public API contract)
 - Each authenticated `user_id` maps to exactly one long-lived Letta `agent_id`.
 - Each user agent owns a separate MemFS Git repository.
 - A user can have many conversations. Their message histories are separate, while their agent MemFS is shared only within that user.
+- The browser cannot choose its own `user_id`; an HttpOnly session maps the login to an immutable internal identity.
 - Every database lookup includes both `conversation_id` and authenticated `user_id`; guessing another UUID is insufficient.
 - `lock:conversation:<id>` serializes turns in one conversation across all API replicas.
 - Different conversation locks can run in parallel. A Redis semaphore caps total in-flight model turns.
@@ -47,7 +48,7 @@ Conversations belonging to different users have different agents and different M
 
 ## Production changes before bank use
 
-- Replace `X-User-Id` with mTLS plus verified bank JWT/OIDC identity. Never accept user identity from browser-controlled input.
+- Replace the local demo accounts with mTLS plus verified bank JWT/OIDC identity.
 - Store secrets in Vault/Kubernetes Secrets, not Compose `.env`.
 - Encrypt database and persistent volumes, define retention/deletion policies, and audit memory reads/writes.
 - Apply NetworkPolicy/egress firewall rules so the Agent can reach only LiteLLM and approved bank tools.

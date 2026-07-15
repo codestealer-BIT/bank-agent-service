@@ -3,19 +3,132 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>银行系统页面示例</title>
-    <style>
-      body { margin: 0; font-family: system-ui, sans-serif; background: #f4f6f9; color: #172033; }
-      main { max-width: 960px; margin: 80px auto; padding: 32px; background: white; border-radius: 18px; }
-      code { background: #eef1f5; padding: 2px 6px; border-radius: 5px; }
-    </style>
+    <meta name="theme-color" content="#4f46e5" />
+    <title>澄川银行 · 智能工作台</title>
+    <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main>
-      <h1>银行业务系统（集成示例）</h1>
-      <p>右下角圆形按钮由独立的 Agent 服务提供。这个页面只负责嵌入脚本。</p>
-      <p>当前演示用户：<code>demo-user-a</code></p>
-    </main>
-    <script src="/widget.js" data-api-base="" data-user-id="demo-user-a"></script>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <section id="authGate" class="auth-shell" aria-labelledby="loginTitle">
+      <div class="auth-showcase">
+        <div class="brand brand-light">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 48 48"><path d="M24 5 42 16v16L24 43 6 32V16L24 5Z"/><path class="brand-cut" d="m24 13 11 7-11 7-11-7 11-7Zm-11 11 11 7 11-7v6l-11 7-11-7v-6Z"/></svg>
+          </span>
+          <span><b>澄川银行</b><small>CHENGCHUAN BANK</small></span>
+        </div>
+        <div class="showcase-copy">
+          <span class="eyebrow light">LETTA MEMORY-NATIVE ASSISTANT</span>
+          <h1>让每一次对话，<br />都成为下一次服务的起点。</h1>
+          <p>专属智能助手将会话与长期记忆安全隔离，在本地持续学习你的工作偏好。</p>
+        </div>
+        <div class="showcase-points">
+          <div><span>01</span><p><b>身份隔离</b><small>一人一 Agent，一人一份记忆</small></p></div>
+          <div><span>02</span><p><b>本地持久化</b><small>MemFS 与业务数据留在本地</small></p></div>
+          <div><span>03</span><p><b>可信协作</b><small>面向业务场景的智能工作流</small></p></div>
+        </div>
+      </div>
+
+      <div class="auth-panel">
+        <div class="mobile-brand brand">
+          <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M24 5 42 16v16L24 43 6 32V16L24 5Z"/><path class="brand-cut" d="m24 13 11 7-11 7-11-7 11-7Zm-11 11 11 7 11-7v6l-11 7-11-7v-6Z"/></svg></span>
+          <span><b>澄川银行</b><small>智能工作台</small></span>
+        </div>
+        <div class="login-card">
+          <span class="eyebrow">SECURE WORKSPACE</span>
+          <h2 id="loginTitle">欢迎回来</h2>
+          <p class="login-lead">登录你的专属智能工作空间</p>
+
+          <form id="loginForm" novalidate>
+            <label for="username">登录账号</label>
+            <div class="input-wrap">
+              <span class="input-icon" aria-hidden="true">✦</span>
+              <input id="username" name="username" autocomplete="username" placeholder="请输入账号" required />
+            </div>
+            <label for="password">登录密码</label>
+            <div class="input-wrap">
+              <span class="input-icon lock" aria-hidden="true">●</span>
+              <input id="password" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required />
+              <button id="togglePassword" class="text-button" type="button" aria-label="显示密码">显示</button>
+            </div>
+            <div id="loginError" class="login-error" role="alert" aria-live="polite"></div>
+            <button id="loginButton" class="primary-button" type="submit">
+              <span>安全登录</span><span aria-hidden="true">→</span>
+            </button>
+          </form>
+
+          <div class="demo-access">
+            <div class="divider"><span>演示账号快捷填充</span></div>
+            <div class="demo-users">
+              <button type="button" data-demo-user="usera"><span class="avatar avatar-a">A</span><span><b>User A</b><small>顾彦航</small></span></button>
+              <button type="button" data-demo-user="userb"><span class="avatar avatar-b">B</span><span><b>User B</b><small>林清禾</small></span></button>
+            </div>
+            <p>演示密码：<code>LettaDemo@2026</code></p>
+          </div>
+        </div>
+        <p class="security-note"><span>◆</span> 本页面为本地原型，正式环境将接入银行统一身份认证</p>
+      </div>
+    </section>
+
+    <div id="appShell" class="app-shell" hidden>
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M24 5 42 16v16L24 43 6 32V16L24 5Z"/><path class="brand-cut" d="m24 13 11 7-11 7-11-7 11-7Zm-11 11 11 7 11-7v6l-11 7-11-7v-6Z"/></svg></span>
+          <span><b>澄川银行</b><small>智能工作台</small></span>
+        </div>
+        <nav aria-label="主导航"><a class="active" href="#">工作台</a><a href="#capabilities">能力中心</a><a href="#security">安全说明</a></nav>
+        <div class="account-area">
+          <div class="live-pill"><i></i> 本地 Agent 在线</div>
+          <div class="account-chip"><span id="headerAvatar" class="avatar avatar-a">A</span><span><b id="headerName">用户</b><small id="headerUsername">账号</small></span></div>
+          <button id="logoutButton" class="icon-button" type="button" title="退出登录" aria-label="退出登录">↗</button>
+        </div>
+      </header>
+
+      <main class="dashboard">
+        <section class="hero-card">
+          <div class="hero-content">
+            <span class="eyebrow light">YOUR PRIVATE AI WORKSPACE</span>
+            <h1><span id="greetingName">你好</span>，今天想从哪里开始？</h1>
+            <p>你的专属 Letta Agent 已经就绪。它能延续对话、沉淀经验，并在属于你的记忆空间里持续成长。</p>
+            <div class="hero-actions">
+              <button class="hero-primary" type="button" data-open-agent>开始对话 <span>↗</span></button>
+              <button class="hero-secondary" type="button" data-new-chat>新建会话 <span>＋</span></button>
+            </div>
+          </div>
+          <div class="hero-visual" aria-hidden="true">
+            <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+            <div class="agent-core"><span>✦</span><small>LETTA</small></div>
+            <div class="float-tag tag-memory"><i></i><span><b>MemFS</b><small>本地长期记忆</small></span></div>
+            <div class="float-tag tag-private"><i></i><span><b>Private</b><small>用户空间隔离</small></span></div>
+          </div>
+        </section>
+
+        <section class="stat-grid" aria-label="运行状态">
+          <article class="stat-card violet"><span class="stat-icon">◈</span><div><small>专属智能体</small><strong>1 : 1</strong><p>独立 Agent 身份</p></div></article>
+          <article class="stat-card cyan"><span class="stat-icon">⌁</span><div><small>记忆存储</small><strong>LOCAL</strong><p>Docker Volume 持久化</p></div></article>
+          <article class="stat-card orange"><span class="stat-icon">⚡</span><div><small>并发模式</small><strong>READY</strong><p>会话隔离与有序处理</p></div></article>
+        </section>
+
+        <section id="capabilities" class="content-section">
+          <div class="section-heading"><div><span class="eyebrow">QUICK START</span><h2>让 AI 进入你的工作流</h2></div><p>从常用场景开始，或直接向右下角的助手提问。</p></div>
+          <div class="capability-grid">
+            <button class="capability-card purple" type="button" data-prompt="请总结我们最近的对话，并列出下一步行动建议。"><span class="cap-icon">✦</span><span><b>回顾与总结</b><small>整理上下文和待办事项</small></span><i>→</i></button>
+            <button class="capability-card blue" type="button" data-prompt="请帮我梳理一个银行业务需求的分析框架。"><span class="cap-icon">▦</span><span><b>业务分析</b><small>快速拆解复杂业务问题</small></span><i>→</i></button>
+            <button class="capability-card pink" type="button" data-prompt="请告诉我你目前记住了哪些关于我的工作偏好。"><span class="cap-icon">◎</span><span><b>记忆检查</b><small>查看 Agent 了解了什么</small></span><i>→</i></button>
+            <button class="capability-card amber" type="button" data-prompt="请给我一个清晰、简洁的今日工作计划模板。"><span class="cap-icon">✓</span><span><b>计划生成</b><small>将目标转化为执行清单</small></span><i>→</i></button>
+          </div>
+        </section>
+
+        <section id="security" class="trust-banner">
+          <div class="trust-icon">◇</div><div><b>本地记忆，边界清晰</b><p>每个登录账号映射独立 Agent 与 MemFS；聊天记录按用户和会话双重校验。</p></div><span>SECURED BY DESIGN</span>
+        </section>
+      </main>
+      <footer><span>© 2026 澄川银行智能研发实验室</span><span>Letta Code Runtime · Local MemFS · LiteLLM</span></footer>
+    </div>
+
+    <script src="/widget.js" defer></script>
+    <script src="/app.js" defer></script>
   </body>
 </html>

@@ -1,17 +1,24 @@
 openapi: 3.1.0
 info:
   title: Bank Letta Agent Service
-  version: 0.1.0
-  description: Prototype contract. Replace X-User-Id with bank-issued JWT/mTLS identity in production.
+  version: 0.2.0
+  description: Local prototype contract using an HttpOnly session cookie. Replace demo credentials with bank SSO/OIDC in production.
 servers:
   - url: http://localhost:8080
 components:
   securitySchemes:
-    DemoUserId:
+    SessionCookie:
       type: apiKey
-      in: header
-      name: X-User-Id
+      in: cookie
+      name: bank_agent_session
   schemas:
+    User:
+      type: object
+      required: [id, username, display_name]
+      properties:
+        id: { type: string }
+        username: { type: string }
+        display_name: { type: string }
     Conversation:
       type: object
       required: [id, user_id, created_at, updated_at]
@@ -38,7 +45,7 @@ components:
         duration_ms: { type: [integer, "null"] }
         idempotent_replay: { type: boolean }
 security:
-  - DemoUserId: []
+  - SessionCookie: []
 paths:
   /health:
     get:
@@ -46,6 +53,35 @@ paths:
       summary: Liveness probe
       responses:
         "200": { description: Healthy }
+  /v1/auth/login:
+    post:
+      security: []
+      summary: Start a local demo session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        "200": { description: Authenticated; sets an HttpOnly session cookie }
+        "401": { description: Invalid credentials }
+        "429": { description: Too many attempts }
+  /v1/auth/me:
+    get:
+      summary: Read the current authenticated identity
+      responses:
+        "200": { description: Current user }
+        "401": { description: Authentication required }
+  /v1/auth/logout:
+    post:
+      summary: Revoke the current session
+      responses:
+        "204": { description: Logged out }
   /v1/conversations:
     get:
       summary: List the authenticated user's conversations

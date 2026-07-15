@@ -6,9 +6,26 @@ import {
   readUserMemory,
   runConversationTurn,
 } from "./agent-service.js";
-import { getAuthenticatedUserId } from "./auth.js";
+import {
+  authenticateCredentials,
+  createAuthenticatedSession,
+  destroyAuthenticatedSession,
+  getAuthenticatedUser,
+  getAuthenticatedUserId,
+} from "./auth.js";
 import { pool } from "./database.js";
-import { withDistributedLock } from "./redis-leases.js";
+import { redis, withDistributedLock } from "./redis-leases.js";
+
+const loginBody = z.object({
+  username: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .min(3)
+    .max(64)
+    .regex(/^[a-z0-9._-]+$/),
+  password: z.string().min(1).max(256),
+});
 
 const createConversationBody = z.object({
   title: z.string().trim().min(1).max(200).optional(),
@@ -38,8 +55,39 @@ type TurnRow = {
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => ({ status: "ok" }));
 
+  app.post("/v1/auth/login", async (request, reply) => {
+    const body = loginBody.parse(request.body);
+    const throttleKey = `login-attempt:${request.ip}:${body.username}`;
+    const attempts = Number((await redis.get(throttleKey)) ?? "0");
+    if (attempts >= 8) {
+      return reply.code(429).send({
+        error: "登录尝试过多，请在 15 分钟后重试",
+      });
+    }
+
+    const user = await authenticateCredentials(body.username, body.password);
+    if (!user) {
+      const count = await redis.incr(throttleKey);
+      if (count === 1) await redis.expire(throttleKey, 15 * 60);
+      return reply.code(401).send({ error: "账号或密码不正确" });
+    }
+
+    await redis.del(throttleKey);
+    await createAuthenticatedSession(user.id, reply);
+    return { user };
+  });
+
+  app.get("/v1/auth/me", async (request) => ({
+    user: await getAuthenticatedUser(request),
+  }));
+
+  app.post("/v1/auth/logout", async (request, reply) => {
+    await destroyAuthenticatedSession(request, reply);
+    return reply.code(204).send();
+  });
+
   app.post("/v1/conversations", async (request, reply) => {
-    const userId = getAuthenticatedUserId(request);
+    const userId = await getAuthenticatedUserId(request);
     const body = createConversationBody.parse(request.body ?? {});
     await getOrCreateUserAgent(userId);
     const id = randomUUID();
@@ -53,7 +101,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/v1/conversations", async (request) => {
-    const userId = getAuthenticatedUserId(request);
+    const userId = await getAuthenticatedUserId(request);
     const result = await pool.query<ConversationRow>(
       `SELECT * FROM conversations
        WHERE user_id = $1
@@ -66,7 +114,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { conversationId: string } }>(
     "/v1/conversations/:conversationId/messages",
     async (request, reply) => {
-      const userId = getAuthenticatedUserId(request);
+      const userId = await getAuthenticatedUserId(request);
       const conversationId = z.string().uuid().parse(request.params.conversationId);
       const owned = await pool.query(
         "SELECT 1 FROM conversations WHERE id = $1 AND user_id = $2",
@@ -90,7 +138,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { conversationId: string } }>(
     "/v1/conversations/:conversationId/messages",
     async (request, reply) => {
-      const userId = getAuthenticatedUserId(request);
+      const userId = await getAuthenticatedUserId(request);
       const conversationId = z.string().uuid().parse(request.params.conversationId);
       const body = messageBody.parse(request.body);
       const requestId = body.request_id ?? randomUUID();
@@ -192,7 +240,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.get("/v1/memory", async (request) => {
-    const userId = getAuthenticatedUserId(request);
+    const userId = await getAuthenticatedUserId(request);
     const agentId = await getOrCreateUserAgent(userId);
     try {
       return { agent_id: agentId, files: await readUserMemory(agentId) };

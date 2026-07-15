@@ -1,5 +1,6 @@
 import pg from "pg";
 import { config } from "./config.js";
+import { hashPassword } from "./security.js";
 
 const { Pool } = pg;
 
@@ -10,6 +11,29 @@ export const pool = new Pool({
 });
 
 const migration = `
+CREATE TABLE IF NOT EXISTS user_accounts (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  display_name TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  password_salt TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES user_accounts(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS auth_sessions_user_idx
+  ON auth_sessions(user_id);
+
+CREATE INDEX IF NOT EXISTS auth_sessions_expires_idx
+  ON auth_sessions(expires_at);
+
 CREATE TABLE IF NOT EXISTS user_agents (
   user_id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL UNIQUE,
@@ -52,6 +76,35 @@ CREATE INDEX IF NOT EXISTS turns_conversation_created_idx
 
 export async function migrate(): Promise<void> {
   await pool.query(migration);
+  await pool.query("DELETE FROM auth_sessions WHERE expires_at <= now()");
+
+  if (config.DEMO_AUTH_ENABLED) {
+    const demoUsers = [
+      { id: "demo-user-a", username: "usera", displayName: "顾彦航" },
+      { id: "demo-user-b", username: "userb", displayName: "林清禾" },
+    ];
+    for (const user of demoUsers) {
+      const exists = await pool.query(
+        "SELECT 1 FROM user_accounts WHERE id = $1 OR username = $2",
+        [user.id, user.username],
+      );
+      if (!exists.rowCount) {
+        const password = await hashPassword(config.DEMO_USER_PASSWORD);
+        await pool.query(
+          `INSERT INTO user_accounts(
+             id, username, display_name, password_hash, password_salt
+           ) VALUES ($1, $2, $3, $4, $5)`,
+          [
+            user.id,
+            user.username,
+            user.displayName,
+            password.hash,
+            password.salt,
+          ],
+        );
+      }
+    }
+  }
 }
 
 export async function closeDatabase(): Promise<void> {
