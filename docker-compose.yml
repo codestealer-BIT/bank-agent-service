@@ -1,0 +1,89 @@
+services:
+  api:
+    build:
+      context: .
+    image: bank-letta-agent-service:local
+    restart: unless-stopped
+    read_only: true
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      HOST: "0.0.0.0"
+      DATABASE_URL: postgres://bank_agent:${POSTGRES_PASSWORD:-local-only-change-me}@postgres:5432/bank_agent
+      REDIS_URL: redis://redis:6379
+      LETTA_LOCAL_BACKEND_EXPERIMENTAL: "1"
+      LETTA_LOCAL_BACKEND_DIR: /data/local-backend
+      LMSTUDIO_BASE_URL: ${LITELLM_BASE_URL:?Set LITELLM_BASE_URL in .env}
+      LMSTUDIO_API_KEY: ${LITELLM_API_KEY:?Set LITELLM_API_KEY in .env}
+      AGENT_MODEL: lmstudio/${LITELLM_MODEL:-MiniMax-M3}
+      MAX_GLOBAL_TURNS: ${MAX_GLOBAL_TURNS:-32}
+      TURN_QUEUE_TIMEOUT_MS: ${TURN_QUEUE_TIMEOUT_MS:-120000}
+      TURN_LEASE_MS: ${TURN_LEASE_MS:-600000}
+      LETTA_REQUEST_TIMEOUT_MS: ${LETTA_REQUEST_TIMEOUT_MS:-600000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+    volumes:
+      - letta_state:/data
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /workspace:size=64m,uid=10001,gid=10001,mode=0700
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 3g
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bank_agent
+      POSTGRES_USER: bank_agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-only-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bank_agent -d bank_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+
+volumes:
+  letta_state:
+  postgres_data:
+  redis_data:
