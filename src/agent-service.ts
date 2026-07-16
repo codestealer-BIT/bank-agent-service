@@ -2,6 +2,13 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import {
   LettaAgentClient,
+  type BootstrapStateOptions,
+  type BootstrapStateResult,
+  type LettaCodeClientSessionOptions,
+  type LettaCodeSession,
+  type RecoverPendingApprovalsOptions,
+  type RecoverPendingApprovalsResult,
+  type RunTurnOptions,
   type SDKResultMessage,
 } from "@letta-ai/letta-agent-sdk";
 import { config } from "./config.js";
@@ -10,6 +17,12 @@ import {
   withDistributedLock,
   withGlobalTurnSlot,
 } from "./redis-leases.js";
+import {
+  APPROVAL_RECOVERY_TIMEOUT_MS,
+  ApprovalConflictError,
+  MAX_APPROVAL_RECOVERY_ATTEMPTS,
+  resolveHeadlessToolApproval,
+} from "./letta-session-policy.js";
 
 const client = new LettaAgentClient({
   backend: "local",
@@ -19,6 +32,19 @@ const client = new LettaAgentClient({
     startupTimeoutMs: 60_000,
   },
 });
+
+// SDK 0.2.6 implements these helpers on local sessions, but its public
+// LettaCodeSession interface does not yet declare them.
+type RecoverableTurnSession = LettaCodeSession & {
+  bootstrapState(options?: BootstrapStateOptions): Promise<BootstrapStateResult>;
+  recoverPendingApprovals(
+    options?: RecoverPendingApprovalsOptions,
+  ): Promise<RecoverPendingApprovalsResult>;
+  runTurn(
+    message: string,
+    options?: RunTurnOptions,
+  ): Promise<SDKResultMessage>;
+};
 
 function stripHiddenReasoning(value: string): string {
   return value.replace(/<think>[\s\S]*?<\/think>\s*/gi, "").trim();
@@ -83,41 +109,75 @@ export async function runConversationTurn(input: {
   lettaConversationId: string;
   durationMs: number;
 }> {
-  return withGlobalTurnSlot(async () => {
-    const session = input.lettaConversationId
-      ? client.resumeSession(input.lettaConversationId, {
-          permissionMode: "standard",
-          skillSources: [],
-          cwd: "/workspace",
-        })
-      : client.createSession(input.agentId, {
-          permissionMode: "standard",
-          skillSources: [],
-          cwd: "/workspace",
-        });
-
-    try {
-      const result = await (
-        session as typeof session & {
-          runTurn(message: string): Promise<SDKResultMessage>;
-        }
-      ).runTurn(input.message);
-      if (!result.success) {
-        throw new Error(
-          result.errorDetail ?? result.error ?? result.stopReason ?? "Agent turn failed",
-        );
-      }
-      const conversationId = result.conversationId ?? session.conversationId;
-      if (!conversationId) throw new Error("Letta did not return a conversation id");
-      return {
-        answer: stripHiddenReasoning(result.result ?? ""),
-        lettaConversationId: conversationId,
-        durationMs: result.durationMs,
+  // A Letta agent can retain approval state across conversations. Serialize all
+  // turns for one agent, not just turns within one application conversation.
+  return withDistributedLock(`agent-turn:${input.agentId}`, () =>
+    withGlobalTurnSlot(async () => {
+      const sessionOptions: LettaCodeClientSessionOptions = {
+        permissionMode: "standard",
+        skillSources: [],
+        cwd: "/workspace",
+        canUseTool: (toolName: string) =>
+          resolveHeadlessToolApproval(toolName),
+        maxApprovalRecoveryAttempts: MAX_APPROVAL_RECOVERY_ATTEMPTS,
+        approvalRecoveryTimeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
       };
-    } finally {
-      session.close();
-    }
-  });
+      const session = (input.lettaConversationId
+        ? client.resumeSession(input.lettaConversationId, sessionOptions)
+        : client.createSession(
+            input.agentId,
+            sessionOptions,
+          )) as RecoverableTurnSession;
+
+      try {
+        // Pending approvals are persistent conversation state. Recover them
+        // before sending so the user's message is not submitted twice by a
+        // conflict-then-retry cycle.
+        const state = await session.bootstrapState({ limit: 1 });
+        if (state.hasPendingApproval === true) {
+          const recovery = await session.recoverPendingApprovals({
+            timeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
+          });
+          if (!recovery.recovered) {
+            throw new ApprovalConflictError(recovery.detail);
+          }
+        }
+
+        const result = await session.runTurn(input.message, {
+          maxApprovalRecoveryAttempts: MAX_APPROVAL_RECOVERY_ATTEMPTS,
+          recoveryTimeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
+        });
+        if (!result.success) {
+          if (
+            result.approvalConflict === true ||
+            result.errorCode === "approval_conflict" ||
+            result.errorCode === "approval_conflict_terminal"
+          ) {
+            throw new ApprovalConflictError(
+              result.errorDetail ?? result.error ?? result.stopReason,
+            );
+          }
+          throw new Error(
+            result.errorDetail ??
+              result.error ??
+              result.stopReason ??
+              "Agent turn failed",
+          );
+        }
+        const conversationId = result.conversationId ?? session.conversationId;
+        if (!conversationId) {
+          throw new Error("Letta did not return a conversation id");
+        }
+        return {
+          answer: stripHiddenReasoning(result.result ?? ""),
+          lettaConversationId: conversationId,
+          durationMs: result.durationMs,
+        };
+      } finally {
+        session.close();
+      }
+    }),
+  );
 }
 
 async function listMarkdownFiles(root: string, current = root): Promise<string[]> {
