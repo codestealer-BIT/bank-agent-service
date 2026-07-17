@@ -1,13 +1,17 @@
 # Bank Letta Agent Service
 
-A Dockerized prototype that embeds private Letta Code agents into a colorful bank workspace and floating chat widget.
+A Dockerized bank infrastructure demo with a shared Letta operations agent,
+machine inventory dashboard, and floating chat widget.
 
 ## What this prototype demonstrates
 
 - Local username/password demo login backed by PostgreSQL.
 - Passwords hashed with salted `scrypt`; sessions stored server-side and referenced by an HttpOnly, SameSite cookie.
-- One private Letta agent and local MemFS repository per authenticated account.
+- One shared Letta agent and shared MemFS knowledge space for all users.
 - Multiple isolated conversations per user.
+- Public demo APIs and read-only agent tools for datacenters and machines.
+- Reusable, privacy-filtered knowledge candidates are queued for later review
+  and Data Sources/Folders ingestion instead of writing MemFS during chat turns.
 - Strict serialization inside one conversation through a Redis distributed lock.
 - Parallel execution across different conversations, with a global concurrency cap (default 32).
 - Persistent local Docker volumes; no Letta Constellation login or cloud MemFS sync.

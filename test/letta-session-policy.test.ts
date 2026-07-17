@@ -5,14 +5,17 @@ import {
   resolveHeadlessToolApproval,
 } from "../src/letta-session-policy.js";
 
-test("allows safe memory and plan-transition tools in headless chat", () => {
-  assert.equal(resolveHeadlessToolApproval("memory").behavior, "allow");
+test("allows only the registered operations tools", () => {
   assert.equal(
-    resolveHeadlessToolApproval("memory_apply_patch").behavior,
+    resolveHeadlessToolApproval("list_machines").behavior,
     "allow",
   );
-  assert.equal(resolveHeadlessToolApproval("EnterPlanMode").behavior, "allow");
-  assert.equal(resolveHeadlessToolApproval("ExitPlanMode").behavior, "allow");
+  assert.equal(
+    resolveHeadlessToolApproval("get_infrastructure_summary").behavior,
+    "allow",
+  );
+  assert.equal(resolveHeadlessToolApproval("EnterPlanMode").behavior, "deny");
+  assert.equal(resolveHeadlessToolApproval("ExitPlanMode").behavior, "deny");
 });
 
 test("denies tools that require unsupported UI or broader access", () => {
@@ -25,6 +28,7 @@ test("denies tools that require unsupported UI or broader access", () => {
 
   const shell = resolveHeadlessToolApproval("Bash");
   assert.equal(shell.behavior, "deny");
+  assert.equal(resolveHeadlessToolApproval("memory_apply_patch").behavior, "deny");
 });
 
 test("approval conflicts expose a stable public error", () => {

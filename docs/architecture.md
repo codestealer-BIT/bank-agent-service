@@ -10,33 +10,35 @@ Bank API gateway / WAF
         v
 bank-letta-agent-service (one public API contract)
   |-- authentication adapter (demo: server-side sessions; production: bank SSO/OIDC)
-  |-- PostgreSQL ownership + conversation + audit records
+  |-- PostgreSQL users + conversations + audit + knowledge candidates
   |-- Redis conversation locks + global model semaphore
   |-- Letta Agent SDK, backend=local
   |     `-- SDK-managed Letta Code app-server processes
-  |-- /data/local-backend/memfs/<agent-id>/memory (local Git repos)
+  |-- one shared /data/local-backend/memfs/<agent-id>/memory Git repo
+  |-- public demo infrastructure API + read-only agent tools
   `-- OpenAI-compatible calls to the approved LiteLLM gateway
 ```
 
 ## Isolation model
 
 - One service endpoint and one assistant template do not mean one shared memory identity.
-- Each authenticated `user_id` maps to exactly one long-lived Letta `agent_id`.
-- Each user agent owns a separate MemFS Git repository.
-- A user can have many conversations. Their message histories are separate, while their agent MemFS is shared only within that user.
+- All authenticated users map to one long-lived shared Letta `agent_id`.
+- A user can have many conversations and each Letta conversation remains separate.
+- Normal chat turns cannot write MemFS directly. The agent may submit a
+  privacy-filtered reusable knowledge candidate into PostgreSQL for later
+  review and ingestion into Letta Data Sources/Folders.
 - The browser cannot choose its own `user_id`; an HttpOnly session maps the login to an immutable internal identity.
 - Every database lookup includes both `conversation_id` and authenticated `user_id`; guessing another UUID is insufficient.
 - `lock:conversation:<id>` serializes turns in one conversation across all API replicas.
-- Different conversation locks can run in parallel. A Redis semaphore caps total in-flight model turns.
+- Different conversation locks can run in parallel even though they use the
+  same agent. A Redis semaphore caps total in-flight model turns.
 
 ## Important concurrency boundary
 
-Letta's SDK notes that concurrent sessions sharing one agent MemFS can contend on Git state. This prototype allows different conversations to run in parallel as requested. For production, either:
-
-1. serialize turns per user/agent for the strongest memory consistency; or
-2. keep conversation-level parallelism and route memory writes through a per-user memory-writer queue with conflict retries.
-
-Conversations belonging to different users have different agents and different MemFS repositories, so they do not share this Git contention point.
+Letta's SDK notes that concurrent sessions sharing one agent MemFS can contend
+on Git state. This prototype keeps conversation turns parallel by denying
+direct MemFS writes during normal chat. Shared knowledge is submitted to a
+separate candidate queue, which can later be reviewed and ingested serially.
 
 ## Data location
 

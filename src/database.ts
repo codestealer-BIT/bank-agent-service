@@ -36,6 +36,15 @@ CREATE INDEX IF NOT EXISTS auth_sessions_expires_idx
 
 CREATE TABLE IF NOT EXISTS user_agents (
   user_id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE user_agents
+  DROP CONSTRAINT IF EXISTS user_agents_agent_id_key;
+
+CREATE TABLE IF NOT EXISTS shared_agents (
+  scope TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL UNIQUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -44,6 +53,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   id UUID PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES user_agents(user_id) ON DELETE CASCADE,
   letta_conversation_id TEXT UNIQUE,
+  agent_id TEXT,
   title TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -72,6 +82,24 @@ CREATE TABLE IF NOT EXISTS turns (
 
 CREATE INDEX IF NOT EXISTS turns_conversation_created_idx
   ON turns(conversation_id, created_at);
+
+ALTER TABLE conversations
+  ADD COLUMN IF NOT EXISTS agent_id TEXT;
+
+CREATE TABLE IF NOT EXISTS knowledge_candidates (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_user_id TEXT NOT NULL REFERENCES user_accounts(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  problem TEXT NOT NULL,
+  reusable_solution TEXT NOT NULL,
+  tags TEXT[] NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reviewed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS knowledge_candidates_status_created_idx
+  ON knowledge_candidates(status, created_at);
 `;
 
 export async function migrate(): Promise<void> {

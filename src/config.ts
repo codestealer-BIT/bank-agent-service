@@ -9,6 +9,7 @@ const envSchema = z.object({
   REDIS_URL: z.string().default("redis://redis:6379"),
   AGENT_MODEL: z.string().default("lmstudio/MiniMax-M3"),
   AGENT_NAME: z.string().default("澄川智能助手"),
+  SHARED_AGENT_SCOPE: z.string().default("bank-operations-demo"),
   LETTA_LOCAL_BACKEND_DIR: z.string().default("/data/letta"),
   MAX_GLOBAL_TURNS: z.coerce.number().int().positive().default(32),
   TURN_QUEUE_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),

@@ -4,10 +4,11 @@ export const APPROVAL_RECOVERY_TIMEOUT_MS = 10_000;
 export const MAX_APPROVAL_RECOVERY_ATTEMPTS = 2;
 
 const HEADLESS_SAFE_TOOLS = new Set([
-  "EnterPlanMode",
-  "ExitPlanMode",
-  "memory",
-  "memory_apply_patch",
+  "list_datacenters",
+  "list_machines",
+  "get_machine_status",
+  "get_infrastructure_summary",
+  "submit_shared_knowledge_candidate",
 ]);
 
 export function resolveHeadlessToolApproval(

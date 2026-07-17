@@ -81,8 +81,8 @@
         <div class="head-row">
           <div class="agent-avatar">✦</div>
           <div class="agent-title">
-            <b>澄川智能助手</b>
-            <span>Letta · 本地长期记忆</span>
+            <b>澄川智能运维助手</b>
+            <span>共享 Letta Agent · 资产查询</span>
           </div>
           <div class="head-actions">
             <button class="history-toggle" title="历史会话" aria-label="历史会话">≡</button>
@@ -92,7 +92,7 @@
         </div>
         <div class="user-line">
           <i class="user-dot"></i>
-          <span class="identity">专属空间已连接</span>
+          <span class="identity">共享 Agent 已连接</span>
         </div>
       </header>
       <div class="body">
@@ -114,7 +114,7 @@
               <textarea rows="1" maxlength="32000" placeholder="输入你的问题…"></textarea>
               <button class="send" aria-label="发送">↑</button>
             </form>
-            <p class="hint">AI 生成内容仅供参考 · 重要业务请核实</p>
+            <p class="hint">演示环境 · 重要操作与外发内容仍需确认</p>
           </div>
         </div>
       </div>
@@ -207,15 +207,15 @@
   const resetMessages = () => {
     messages.innerHTML = `
       <div class="welcome">
-        <b>你好，${currentUser?.display_name ?? "朋友"} 👋</b>
-        <p>我是你的专属智能助手。不同账号拥有独立的 Agent、会话和长期记忆空间。</p>
+        <b>你好，${currentUser?.display_name ?? "同事"}</b>
+        <p>我是共享智能运维助手。每位用户可以拥有多个独立会话，我可以查询演示机房、机器状态并汇总异常情况。</p>
       </div>
       <div class="suggestions">
-        <button data-text="请介绍一下你能为我做什么">你能做什么？</button>
-        <button data-text="请总结我的工作偏好">我的工作偏好</button>
-        <button data-text="帮我制定今天的工作计划">生成工作计划</button>
+        <button data-text="请汇总所有机房的机器运行情况">全部机房概览</button>
+        <button data-text="列出目前所有告警和离线的机器">查看异常机器</button>
+        <button data-text="北京核心机房有多少台机器？">统计北京机房</button>
       </div>
-      <div class="thread-empty">左上角“历史会话”里可以回看之前的聊天，也可以直接从这里开始一个新会话。</div>
+      <div class="thread-empty">可以从左上角查看当前账号的历史会话，或直接开始新的资产查询。</div>
     `;
     renderSuggestions();
   };
@@ -347,7 +347,7 @@
     input.value = "";
     input.style.height = "auto";
     append(text, "user");
-    const waiting = append("正在连接你的专属 Agent…", "assistant", "waiting");
+    const waiting = append("正在查询共享 Agent…", "assistant", "waiting");
     if (targetConversationId) {
       pendingConversationIds.add(targetConversationId);
     } else {
@@ -450,7 +450,7 @@
       try {
         const result = await request("/v1/auth/me");
         currentUser = result.user;
-        identity.textContent = `${currentUser.display_name}的专属空间 · @${currentUser.username}`;
+        identity.textContent = `${currentUser.display_name} · @${currentUser.username}`;
         conversationId = null;
         viewVersion += 1;
         resetMessages();

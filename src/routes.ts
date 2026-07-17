@@ -15,6 +15,11 @@ import {
 } from "./auth.js";
 import { pool } from "./database.js";
 import { redis, withDistributedLock } from "./redis-leases.js";
+import {
+  datacenters,
+  filterMachines,
+  infrastructureSummary,
+} from "./infrastructure.js";
 
 const loginBody = z.object({
   username: z
@@ -40,6 +45,7 @@ type ConversationRow = {
   id: string;
   user_id: string;
   letta_conversation_id: string | null;
+  agent_id: string | null;
   title: string | null;
   created_at: Date;
   updated_at: Date;
@@ -54,6 +60,54 @@ type TurnRow = {
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => ({ status: "ok" }));
+
+  app.get("/v1/infrastructure/datacenters", async () => ({
+    datacenters,
+  }));
+
+  app.get<{
+    Querystring: {
+      datacenter_ids?: string;
+      status?: string;
+      keyword?: string;
+      limit?: string;
+    };
+  }>("/v1/infrastructure/machines", async (request) => {
+    const query = z
+      .object({
+        datacenter_ids: z.string().optional(),
+        status: z.enum(["healthy", "warning", "offline"]).optional(),
+        keyword: z.string().optional(),
+        limit: z.coerce.number().int().min(1).max(100).optional(),
+      })
+      .parse(request.query);
+    const datacenterIds = query.datacenter_ids
+      ?.split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    return {
+      machines: filterMachines({
+        datacenterIds,
+        status: query.status,
+        keyword: query.keyword,
+        limit: query.limit,
+      }),
+    };
+  });
+
+  app.get<{
+    Querystring: { datacenter_ids?: string };
+  }>("/v1/infrastructure/summary", async (request) => {
+    const query = z
+      .object({ datacenter_ids: z.string().optional() })
+      .parse(request.query);
+    const datacenterIds =
+      query.datacenter_ids
+        ?.split(",")
+        .map((item) => item.trim())
+        .filter(Boolean) ?? [];
+    return infrastructureSummary(datacenterIds);
+  });
 
   app.post("/v1/auth/login", async (request, reply) => {
     const body = loginBody.parse(request.body);
@@ -89,13 +143,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post("/v1/conversations", async (request, reply) => {
     const userId = await getAuthenticatedUserId(request);
     const body = createConversationBody.parse(request.body ?? {});
-    await getOrCreateUserAgent(userId);
+    const agentId = await getOrCreateUserAgent(userId);
     const id = randomUUID();
     const result = await pool.query<ConversationRow>(
-      `INSERT INTO conversations(id, user_id, title)
-       VALUES ($1, $2, $3)
+      `INSERT INTO conversations(id, user_id, agent_id, title)
+       VALUES ($1, $2, $3, $4)
        RETURNING *`,
-      [id, userId, body.title ?? null],
+      [id, userId, agentId, body.title ?? null],
     );
     return reply.code(201).send(result.rows[0]);
   });
@@ -189,7 +243,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           const result = await runConversationTurn({
             userId,
             agentId,
-            lettaConversationId: conversation.letta_conversation_id,
+            lettaConversationId:
+              conversation.agent_id === agentId
+                ? conversation.letta_conversation_id
+                : null,
             message: body.message,
           });
 
@@ -198,10 +255,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             await databaseClient.query("BEGIN");
             await databaseClient.query(
               `UPDATE conversations
-               SET letta_conversation_id = COALESCE(letta_conversation_id, $1),
+               SET letta_conversation_id = $1,
+                   agent_id = $2,
                    updated_at = now()
-               WHERE id = $2 AND user_id = $3`,
-              [result.lettaConversationId, conversationId, userId],
+               WHERE id = $3 AND user_id = $4`,
+              [result.lettaConversationId, agentId, conversationId, userId],
             );
             await databaseClient.query(
               `UPDATE turns
