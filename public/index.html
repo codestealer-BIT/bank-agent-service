@@ -226,6 +226,27 @@
                   <div class="composer-wrap">
                     <div class="suggestions" id="assistantSuggestions"></div>
                     <form id="chatComposer" class="composer">
+                      <input
+                        id="attachmentInput"
+                        type="file"
+                        accept="image/png,image/jpeg,image/gif,image/webp,text/*,.txt,.md,.log,.json,.csv"
+                        multiple
+                        hidden
+                      />
+                      <div class="attach-wrap">
+                        <button
+                          id="attachButton"
+                          class="attach-button"
+                          type="button"
+                          aria-label="添加附件"
+                          title="添加附件"
+                        >+</button>
+                        <div id="attachmentMenu" class="attachment-menu" hidden>
+                          <button type="button" data-attach-kind="image">上传图片</button>
+                          <button type="button" data-attach-kind="file">上传文件</button>
+                        </div>
+                      </div>
+                      <div id="attachmentPreview" class="attachment-preview" hidden></div>
                       <textarea
                         id="chatInput"
                         rows="1"
@@ -391,6 +412,6 @@
       </section>
     </div>
 
-    <script src="/app.js" defer></script>
+    <script src="/app.js?v=20260720-schedule-stream" defer></script>
   </body>
 </html>

@@ -3,6 +3,7 @@ import { pool } from "./database.js";
 import {
   getOrCreateUserAgent,
   runConversationTurn,
+  streamConversationTurn,
 } from "./agent-service.js";
 import { withDistributedLock } from "./redis-leases.js";
 
@@ -411,17 +412,21 @@ async function prepareScheduleExecution(
 
 async function executePreparedScheduleTask(
   context: ScheduledExecutionContext,
+  onDelta?: (delta: string) => void | Promise<void>,
 ): Promise<string> {
   const { runId, requestId, conversationId, agentId, schedule, firedAt } = context;
 
   try {
-    const result = await runConversationTurn({
+    const turnInput = {
       userId: schedule.user_id,
       agentId,
       lettaConversationId: null,
       message: schedule.prompt,
       emailRecipient: schedule.recipient_email,
-    });
+    };
+    const result = onDelta
+      ? await streamConversationTurn(turnInput, onDelta)
+      : await runConversationTurn(turnInput);
 
     const nextRunAt =
       schedule.schedule_type === "one_off"
@@ -588,4 +593,38 @@ export async function triggerScheduleNow(
     { timeoutMs: 5_000, leaseMs: 600_000 },
   );
   return output;
+}
+
+export async function streamScheduleNow(
+  userId: string,
+  scheduleId: string,
+  callbacks: {
+    onStart: (event: { conversationId: string; requestId: string }) => void | Promise<void>;
+    onDelta: (delta: string) => void | Promise<void>;
+  },
+): Promise<{ found: boolean; conversationId?: string; requestId?: string }> {
+  const result = await pool.query<ScheduleRow>(
+    "SELECT * FROM schedules WHERE id = $1 AND user_id = $2",
+    [scheduleId, userId],
+  );
+  const schedule = result.rows[0];
+  if (!schedule) return { found: false };
+
+  return withDistributedLock(
+    `schedule:${scheduleId}:manual`,
+    async () => {
+      const context = await prepareScheduleExecution(schedule, new Date());
+      await callbacks.onStart({
+        conversationId: context.conversationId,
+        requestId: context.requestId,
+      });
+      await executePreparedScheduleTask(context, callbacks.onDelta);
+      return {
+        found: true as const,
+        conversationId: context.conversationId,
+        requestId: context.requestId,
+      };
+    },
+    { timeoutMs: 5_000, leaseMs: 600_000 },
+  );
 }

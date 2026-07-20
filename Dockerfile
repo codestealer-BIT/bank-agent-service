@@ -7,6 +7,8 @@ RUN apt-get update \
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
+COPY scripts ./scripts
+RUN npm run patch:letta-code-vision
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build

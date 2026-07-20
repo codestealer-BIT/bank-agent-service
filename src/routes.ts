@@ -5,6 +5,8 @@ import {
   getOrCreateUserAgent,
   readUserMemory,
   runConversationTurn,
+  streamConversationTurn,
+  type TurnAttachment,
 } from "./agent-service.js";
 import {
   authenticateCredentials,
@@ -25,6 +27,7 @@ import {
   deleteSchedule,
   listSchedules,
   scheduleLabel,
+  streamScheduleNow,
   triggerScheduleNow,
   updateSchedule,
   type RecurrenceKind,
@@ -45,10 +48,77 @@ const createConversationBody = z.object({
   title: z.string().trim().min(1).max(200).optional(),
 });
 
+const imageMediaType = z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const attachmentBody = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("image"),
+    name: z.string().trim().min(1).max(240),
+    media_type: imageMediaType,
+    data: z.string().trim().min(1).max(6_000_000),
+    size: z.number().int().min(0).max(4 * 1024 * 1024).optional(),
+  }),
+  z.object({
+    kind: z.literal("text_file"),
+    name: z.string().trim().min(1).max(240),
+    media_type: z.string().trim().min(1).max(120),
+    text: z.string().max(100_000),
+    size: z.number().int().min(0).max(512 * 1024).optional(),
+  }),
+  z.object({
+    kind: z.literal("file"),
+    name: z.string().trim().min(1).max(240),
+    media_type: z.string().trim().min(1).max(120),
+    size: z.number().int().min(0).max(20 * 1024 * 1024).optional(),
+  }),
+]);
+
 const messageBody = z.object({
   message: z.string().trim().min(1).max(32_000),
   request_id: z.string().trim().min(1).max(128).optional(),
+  attachments: z.array(attachmentBody).max(4).optional(),
 });
+
+function toTurnAttachments(
+  attachments: z.infer<typeof attachmentBody>[] | undefined,
+): TurnAttachment[] {
+  return (attachments ?? []).map((attachment) => {
+    if (attachment.kind === "image") {
+      return {
+        kind: "image",
+        name: attachment.name,
+        mediaType: attachment.media_type,
+        data: attachment.data,
+        size: attachment.size,
+      };
+    }
+    if (attachment.kind === "text_file") {
+      return {
+        kind: "text_file",
+        name: attachment.name,
+        mediaType: attachment.media_type,
+        text: attachment.text,
+        size: attachment.size,
+      };
+    }
+    return {
+      kind: "file",
+      name: attachment.name,
+      mediaType: attachment.media_type,
+      size: attachment.size,
+    };
+  });
+}
+
+function displayMessageWithAttachments(
+  message: string,
+  attachments: z.infer<typeof attachmentBody>[] | undefined,
+): string {
+  if (!attachments?.length) return message;
+  const summary = attachments
+    .map((attachment) => `- ${attachment.name} (${attachment.media_type})`)
+    .join("\n");
+  return `${message}\n\n[附件]\n${summary}`;
+}
 
 const scheduleBodyShape = {
   name: z.string().trim().min(1).max(120),
@@ -139,6 +209,13 @@ type TurnRow = {
   status: "processing" | "completed" | "failed";
   duration_ms: number | null;
 };
+
+function writeNdjson(
+  reply: import("fastify").FastifyReply,
+  event: Record<string, unknown>,
+): void {
+  reply.raw.write(`${JSON.stringify(event)}\n`);
+}
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => ({ status: "ok" }));
@@ -384,6 +461,74 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.post<{ Params: { scheduleId: string } }>(
+    "/v1/schedules/:scheduleId/trigger/stream",
+    async (request, reply) => {
+      const userId = await getAuthenticatedUserId(request);
+      const scheduleId = z.string().uuid().parse(request.params.scheduleId);
+      const owned = await pool.query(
+        "SELECT 1 FROM schedules WHERE id = $1 AND user_id = $2",
+        [scheduleId, userId],
+      );
+      if (!owned.rowCount) {
+        return reply.code(404).send({ error: "Schedule not found" });
+      }
+
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "Content-Encoding": "identity",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      reply.raw.flushHeaders();
+      reply.raw.socket?.setNoDelay(true);
+
+      const safeWrite = (event: Record<string, unknown>) => {
+        if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+          writeNdjson(reply, event);
+        }
+      };
+
+      try {
+        const triggered = await streamScheduleNow(userId, scheduleId, {
+          onStart: ({ conversationId, requestId }) => {
+            safeWrite({
+              type: "start",
+              conversation_id: conversationId,
+              request_id: requestId,
+            });
+          },
+          onDelta: (delta) => safeWrite({ type: "delta", text: delta }),
+        });
+        const completed = triggered.requestId
+          ? await pool.query<TurnRow>(
+              `SELECT request_id, assistant_message, status, duration_ms
+               FROM turns WHERE user_id = $1 AND request_id = $2`,
+              [userId, triggered.requestId],
+            )
+          : null;
+        safeWrite({
+          type: "final",
+          conversation_id: triggered.conversationId,
+          request_id: triggered.requestId,
+          answer: completed?.rows[0]?.assistant_message ?? "",
+          duration_ms: completed?.rows[0]?.duration_ms ?? null,
+        });
+      } catch (error) {
+        safeWrite({
+          type: "error",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+        reply.raw.end();
+      }
+    },
+  );
+
   app.post("/v1/auth/logout", async (request, reply) => {
     await destroyAuthenticatedSession(request, reply);
     return reply.code(204).send();
@@ -484,7 +629,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             `INSERT INTO turns(
                id, request_id, conversation_id, user_id, user_message, status
              ) VALUES ($1, $2, $3, $4, $5, 'processing')`,
-            [randomUUID(), requestId, conversationId, userId, body.message],
+            [
+              randomUUID(),
+              requestId,
+              conversationId,
+              userId,
+              displayMessageWithAttachments(body.message, body.attachments),
+            ],
           );
         }
 
@@ -497,6 +648,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
                 ? conversation.letta_conversation_id
                 : null,
             message: body.message,
+            attachments: toTurnAttachments(body.attachments),
           });
 
           const databaseClient = await pool.connect();
@@ -543,6 +695,159 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           throw error;
         }
       });
+    },
+  );
+
+  app.post<{ Params: { conversationId: string } }>(
+    "/v1/conversations/:conversationId/messages/stream",
+    async (request, reply) => {
+      const userId = await getAuthenticatedUserId(request);
+      const conversationId = z.string().uuid().parse(request.params.conversationId);
+      const body = messageBody.parse(request.body);
+      const requestId = body.request_id ?? randomUUID();
+
+      const conversationResult = await pool.query<ConversationRow>(
+        `SELECT * FROM conversations
+         WHERE id = $1 AND user_id = $2`,
+        [conversationId, userId],
+      );
+      const conversation = conversationResult.rows[0];
+      if (!conversation) {
+        return reply.code(404).send({ error: "Conversation not found" });
+      }
+
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "Content-Encoding": "identity",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      reply.raw.flushHeaders();
+      reply.raw.socket?.setNoDelay(true);
+
+      const safeWrite = (event: Record<string, unknown>) => {
+        if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+          writeNdjson(reply, event);
+        }
+      };
+
+      await withDistributedLock(`conversation:${conversationId}`, async () => {
+        safeWrite({
+          type: "start",
+          request_id: requestId,
+          conversation_id: conversationId,
+        });
+
+        const existing = await pool.query<TurnRow>(
+          `SELECT request_id, assistant_message, status, duration_ms
+           FROM turns WHERE user_id = $1 AND request_id = $2`,
+          [userId, requestId],
+        );
+        if (existing.rows[0]?.status === "completed") {
+          safeWrite({
+            type: "final",
+            request_id: requestId,
+            conversation_id: conversationId,
+            answer: existing.rows[0].assistant_message ?? "",
+            duration_ms: existing.rows[0].duration_ms,
+            idempotent_replay: true,
+          });
+          return;
+        }
+
+        const agentId = await getOrCreateUserAgent(userId);
+        if (existing.rowCount) {
+          await pool.query(
+            `UPDATE turns SET status = 'processing', error = NULL
+             WHERE user_id = $1 AND request_id = $2`,
+            [userId, requestId],
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO turns(
+               id, request_id, conversation_id, user_id, user_message, status
+             ) VALUES ($1, $2, $3, $4, $5, 'processing')`,
+            [
+              randomUUID(),
+              requestId,
+              conversationId,
+              userId,
+              displayMessageWithAttachments(body.message, body.attachments),
+            ],
+          );
+        }
+
+        try {
+          const result = await streamConversationTurn(
+            {
+              userId,
+              agentId,
+              lettaConversationId:
+                conversation.agent_id === agentId
+                  ? conversation.letta_conversation_id
+                  : null,
+              message: body.message,
+              attachments: toTurnAttachments(body.attachments),
+            },
+            (delta) => safeWrite({ type: "delta", text: delta }),
+          );
+
+          const databaseClient = await pool.connect();
+          try {
+            await databaseClient.query("BEGIN");
+            await databaseClient.query(
+              `UPDATE conversations
+               SET letta_conversation_id = $1,
+                   agent_id = $2,
+                   updated_at = now()
+               WHERE id = $3 AND user_id = $4`,
+              [result.lettaConversationId, agentId, conversationId, userId],
+            );
+            await databaseClient.query(
+              `UPDATE turns
+               SET assistant_message = $1, status = 'completed', error = NULL,
+                   duration_ms = $2, completed_at = now()
+               WHERE user_id = $3 AND request_id = $4`,
+              [result.answer, result.durationMs, userId, requestId],
+            );
+            await databaseClient.query("COMMIT");
+          } catch (error) {
+            await databaseClient.query("ROLLBACK");
+            throw error;
+          } finally {
+            databaseClient.release();
+          }
+
+          safeWrite({
+            type: "final",
+            request_id: requestId,
+            conversation_id: conversationId,
+            answer: result.answer,
+            duration_ms: result.durationMs,
+            idempotent_replay: false,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          await pool.query(
+            `UPDATE turns
+             SET status = 'failed', error = $1, completed_at = now()
+             WHERE user_id = $2 AND request_id = $3`,
+            [message, userId, requestId],
+          );
+          safeWrite({
+            type: "error",
+            request_id: requestId,
+            conversation_id: conversationId,
+            error: message,
+          });
+        }
+      });
+
+      if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+        reply.raw.end();
+      }
     },
   );
 

@@ -32,6 +32,10 @@
   const chatComposer = document.querySelector("#chatComposer");
   const chatInput = document.querySelector("#chatInput");
   const sendButton = document.querySelector("#sendButton");
+  const attachmentInput = document.querySelector("#attachmentInput");
+  const attachButton = document.querySelector("#attachButton");
+  const attachmentMenu = document.querySelector("#attachmentMenu");
+  const attachmentPreview = document.querySelector("#attachmentPreview");
 
   const scheduleTabs = [...document.querySelectorAll(".schedule-tab")];
   const scheduleList = document.querySelector("#scheduleList");
@@ -74,10 +78,14 @@
   let creatingConversation = false;
   let conversations = [];
   let pendingConversationIds = new Set();
+  const conversationStreams = new Map();
+  let conversationLoadVersion = 0;
   let schedules = [];
   let templates = [];
   let scheduleFilter = "all";
   let suppressMessageAutoScroll = false;
+  let pendingAttachments = [];
+  let attachInputMode = "file";
 
   const setButtonBusy = (button, busy, label = "") => {
     if (!button) return;
@@ -114,6 +122,55 @@
       });
     }
     return body;
+  };
+
+  const streamRequest = async (path, payload, onEvent) => {
+    const response = await fetch(path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw Object.assign(new Error(body?.error ?? `HTTP ${response.status}`), {
+        status: response.status,
+      });
+    }
+    if (!response.body) {
+      const body = await response.json();
+      onEvent(body);
+      return body;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalEvent = null;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const event = JSON.parse(line);
+        finalEvent = event.type === "final" ? event : finalEvent;
+        await onEvent(event);
+      }
+      if (done) break;
+    }
+
+    if (buffer.trim()) {
+      const event = JSON.parse(buffer);
+      finalEvent = event.type === "final" ? event : finalEvent;
+      await onEvent(event);
+    }
+
+    return finalEvent;
   };
 
   const avatarClass = (user) =>
@@ -194,6 +251,189 @@
       messages.scrollTop = messages.scrollHeight;
     }
     return element;
+  };
+
+  const findStreamMessage = (requestId) =>
+    [...messages.querySelectorAll("[data-stream-request-id]")].find(
+      (element) => element.dataset.streamRequestId === requestId,
+    ) ?? null;
+
+  const renderConversationStream = (targetConversationId, shouldScroll = true) => {
+    if (assistantView !== "chat" || conversationId !== targetConversationId) return;
+    const state = conversationStreams.get(targetConversationId);
+    if (!state) return;
+
+    let element = findStreamMessage(state.requestId);
+    if (!element) {
+      messages.querySelector(".thread-empty")?.remove();
+      element = appendMessage("", "assistant", "", false);
+      element.dataset.streamRequestId = state.requestId;
+    }
+
+    if (state.status === "failed") {
+      element.className = "msg assistant error";
+      element.textContent = state.error || "智能体请求失败";
+    } else if (state.status === "completed") {
+      element.className = "msg assistant";
+      element.textContent = state.answer || state.text || "智能体暂时没有返回文字。";
+    } else if (state.text) {
+      element.className = "msg assistant";
+      element.textContent = state.text;
+    } else {
+      element.className = "msg assistant waiting";
+      element.textContent = state.waitingText;
+    }
+
+    if (shouldScroll && !suppressMessageAutoScroll) {
+      messages.scrollTop = messages.scrollHeight;
+    }
+  };
+
+  const formatBytes = (bytes = 0) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  };
+
+  const readAsDataUrl = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.addEventListener("load", () => resolve(String(reader.result)));
+      reader.addEventListener("error", () => reject(reader.error));
+      reader.readAsDataURL(file);
+    });
+
+  const readAsText = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.addEventListener("load", () => resolve(String(reader.result)));
+      reader.addEventListener("error", () => reject(reader.error));
+      reader.readAsText(file);
+    });
+
+  const isTextLikeFile = (file) =>
+    file.type.startsWith("text/") ||
+    /\.(txt|md|log|json|csv|yaml|yml)$/i.test(file.name);
+
+  const renderAttachmentPreview = () => {
+    attachmentPreview.innerHTML = "";
+    attachmentPreview.hidden = pendingAttachments.length === 0;
+    pendingAttachments.forEach((attachment, index) => {
+      const item = document.createElement("div");
+      item.className = `attachment-chip ${attachment.kind}`;
+      if (attachment.kind === "image") {
+        const image = document.createElement("img");
+        image.src = attachment.previewUrl;
+        image.alt = attachment.name;
+        item.append(image);
+      } else {
+        const icon = document.createElement("span");
+        icon.className = "attachment-file-icon";
+        icon.textContent = attachment.kind === "text_file" ? "TXT" : "FILE";
+        item.append(icon);
+      }
+      const meta = document.createElement("span");
+      meta.className = "attachment-chip-meta";
+      meta.textContent = `${attachment.name} · ${formatBytes(attachment.size)}`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", `移除 ${attachment.name}`);
+      remove.addEventListener("click", () => {
+        pendingAttachments.splice(index, 1);
+        renderAttachmentPreview();
+        updateComposerState();
+      });
+      item.append(meta, remove);
+      attachmentPreview.append(item);
+    });
+  };
+
+  const showAttachmentError = (message) => {
+    const chip = document.createElement("div");
+    chip.className = "attachment-error";
+    chip.textContent = message;
+    attachmentPreview.hidden = false;
+    attachmentPreview.append(chip);
+    setTimeout(() => {
+      if (chip.isConnected) chip.remove();
+      if (!pendingAttachments.length && !attachmentPreview.children.length) {
+        attachmentPreview.hidden = true;
+      }
+    }, 3600);
+  };
+
+  const addFiles = async (files) => {
+    const selected = [...files];
+    const errors = [];
+    for (const file of selected) {
+      if (pendingAttachments.length >= 4) {
+        errors.push("一次最多添加 4 个附件。");
+        break;
+      }
+      try {
+        if (file.type.startsWith("image/")) {
+          if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type)) {
+            errors.push(`${file.name} 不是支持的图片格式。`);
+            continue;
+          }
+          if (file.size > 4 * 1024 * 1024) {
+            errors.push(`${file.name} 超过 4MB，无法发送。`);
+            continue;
+          }
+          const dataUrl = await readAsDataUrl(file);
+          const [, data = ""] = dataUrl.split(",");
+          pendingAttachments.push({
+            kind: "image",
+            name: file.name,
+            media_type: file.type,
+            data,
+            size: file.size,
+            previewUrl: dataUrl,
+          });
+        } else if (isTextLikeFile(file)) {
+          if (file.size > 512 * 1024) {
+            errors.push(`${file.name} 超过 512KB，无法作为文本读取。`);
+            continue;
+          }
+          pendingAttachments.push({
+            kind: "text_file",
+            name: file.name,
+            media_type: file.type || "text/plain",
+            text: await readAsText(file),
+            size: file.size,
+          });
+        } else {
+          pendingAttachments.push({
+            kind: "file",
+            name: file.name,
+            media_type: file.type || "application/octet-stream",
+            size: file.size,
+          });
+        }
+      } catch (error) {
+        errors.push(`${file.name} 读取失败：${error.message || "未知错误"}`);
+      }
+    }
+    renderAttachmentPreview();
+    errors.forEach(showAttachmentError);
+    updateComposerState();
+  };
+
+  const attachmentSummary = (attachments) =>
+    attachments.length
+      ? `\n\n[附件]\n${attachments
+          .map((attachment) => `- ${attachment.name} (${attachment.media_type})`)
+          .join("\n")}`
+      : "";
+
+  const serializeAttachments = (attachments) =>
+    attachments.map(({ previewUrl, ...attachment }) => attachment);
+
+  const clearPendingAttachments = () => {
+    pendingAttachments = [];
+    renderAttachmentPreview();
+    updateComposerState();
   };
 
   const updateHeader = () => {
@@ -333,6 +573,8 @@
   };
 
   const resetChatMessages = () => {
+    pendingAttachments = [];
+    renderAttachmentPreview();
     messages.innerHTML = "";
     const welcome = document.createElement("div");
     welcome.className = "welcome";
@@ -414,13 +656,19 @@
     suppressMessageAutoScroll = true;
     turns.forEach((turn) => {
       appendMessage(turn.user_message ?? "", "user");
+      let assistantMessage;
       if (turn.status === "completed") {
-        appendMessage(turn.assistant_message ?? "", "assistant");
+        assistantMessage = appendMessage(turn.assistant_message ?? "", "assistant");
       } else if (turn.status === "failed") {
-        appendMessage(turn.error || "处理失败", "assistant", "error");
+        assistantMessage = appendMessage(turn.error || "处理失败", "assistant", "error");
       } else {
-        appendMessage(turn.assistant_message || "这条消息仍在处理中。", "assistant", "waiting");
+        assistantMessage = appendMessage(
+          turn.assistant_message || "这条消息仍在处理中。",
+          "assistant",
+          "waiting",
+        );
       }
+      if (turn.request_id) assistantMessage.dataset.streamRequestId = turn.request_id;
     });
     suppressMessageAutoScroll = false;
     messages.scrollTop = 0;
@@ -429,7 +677,8 @@
   const updateComposerState = () => {
     const busy = (!conversationId && creatingConversation) ||
       (conversationId && pendingConversationIds.has(conversationId));
-    sendButton.disabled = !currentUser || busy;
+    sendButton.disabled =
+      !currentUser || busy || (!chatInput.value.trim() && !pendingAttachments.length);
   };
 
   const refreshConversations = async () => {
@@ -445,6 +694,8 @@
   };
 
   const openConversation = async (id) => {
+    const loadVersion = ++conversationLoadVersion;
+    clearPendingAttachments();
     conversationId = id;
     assistantView = "chat";
     updateAssistantButtons();
@@ -454,13 +705,21 @@
     messages.innerHTML = '<div class="thread-empty">??????...</div>';
     try {
       const result = await request(`/v1/conversations/${id}/messages`);
+      if (loadVersion !== conversationLoadVersion || conversationId !== id) return;
       renderTurns(result.messages ?? []);
+      renderConversationStream(id, false);
+      if (conversationStreams.get(id)?.status !== "pending") {
+        conversationStreams.delete(id);
+      }
     } catch (error) {
+      if (loadVersion !== conversationLoadVersion || conversationId !== id) return;
       messages.innerHTML = `<div class="thread-empty">???????${error.message}</div>`;
     }
   };
 
   const createNewConversationDraft = () => {
+    conversationLoadVersion += 1;
+    clearPendingAttachments();
     conversationId = null;
     assistantView = "chat";
     updateAssistantButtons();
@@ -473,26 +732,32 @@
 
   async function submitMessage(rawText) {
     const text = rawText.trim();
-    if (!text || !currentUser) return;
+    const attachments = [...pendingAttachments];
+    if ((!text && !attachments.length) || !currentUser) return;
     if ((!conversationId && creatingConversation) || pendingConversationIds.has(conversationId)) {
       return;
     }
 
     assistantView = "chat";
     updateAssistantButtons();
-    appendMessage(text, "user");
+    const messageText = text || "请分析我上传的附件。";
+    appendMessage(`${messageText}${attachmentSummary(attachments)}`, "user");
     const waiting = appendMessage("正在查询智能体…", "assistant", "waiting");
+    const requestId = crypto.randomUUID();
+    waiting.dataset.streamRequestId = requestId;
     let targetConversationId = conversationId;
 
     chatInput.value = "";
     chatInput.style.height = "auto";
+    pendingAttachments = [];
+    renderAttachmentPreview();
 
     if (!targetConversationId) {
       creatingConversation = true;
       updateComposerState();
       const created = await request("/v1/conversations", {
         method: "POST",
-        body: JSON.stringify({ title: text.slice(0, 40) }),
+        body: JSON.stringify({ title: messageText.slice(0, 40) }),
       });
       targetConversationId = created.id;
       conversationId = created.id;
@@ -502,22 +767,57 @@
     }
 
     pendingConversationIds.add(targetConversationId);
+    conversationStreams.set(targetConversationId, {
+      requestId,
+      status: "pending",
+      text: "",
+      answer: "",
+      error: "",
+      waitingText: waiting.textContent,
+    });
     updateComposerState();
     try {
-      const result = await request(`/v1/conversations/${targetConversationId}/messages`, {
-        method: "POST",
-        body: JSON.stringify({
-          message: text,
-          request_id: crypto.randomUUID(),
-        }),
-      });
-      waiting.className = "msg assistant";
-      waiting.textContent = result.answer || "智能体暂时没有返回文字。";
+      let streamCompleted = false;
+      await streamRequest(
+        `/v1/conversations/${targetConversationId}/messages/stream`,
+        {
+          message: messageText,
+          attachments: serializeAttachments(attachments),
+          request_id: requestId,
+        },
+        (event) => {
+          const state = conversationStreams.get(targetConversationId);
+          if (!state || state.requestId !== requestId) return;
+          if (event.type === "delta") {
+            state.text += event.text || "";
+            renderConversationStream(targetConversationId);
+          }
+          if (event.type === "final") {
+            streamCompleted = true;
+            state.status = "completed";
+            state.answer = event.answer || state.text;
+            renderConversationStream(targetConversationId);
+          }
+          if (event.type === "error") {
+            throw new Error(event.error || "Agent stream failed");
+          }
+        },
+      );
+      const state = conversationStreams.get(targetConversationId);
+      if (!streamCompleted && state?.text) {
+        state.status = "completed";
+        state.answer = state.text;
+        renderConversationStream(targetConversationId);
+      }
       await refreshConversations();
     } catch (error) {
-      waiting.className = "msg assistant error";
-      waiting.textContent =
-        error.status === 401 ? "登录已失效，请重新登录。" : `请求失败：${error.message}`;
+      const state = conversationStreams.get(targetConversationId);
+      if (state?.requestId === requestId) {
+        state.status = "failed";
+        state.error =
+          error.status === 401 ? "登录已失效，请重新登录。" : `请求失败：${error.message}`;
+        renderConversationStream(targetConversationId);
+      }
       if (error.status === 401) showLogin();
     } finally {
       pendingConversationIds.delete(targetConversationId);
@@ -591,21 +891,67 @@
       article.querySelector("[data-run]").addEventListener("click", async (event) => {
         const button = event.currentTarget;
         setButtonBusy(button, true, "正在执行...");
+        let targetConversationId = null;
+        let requestId = null;
         try {
-          const result = await request(`/v1/schedules/${schedule.id}/trigger`, {
-            method: "POST",
-            body: "{}",
-          });
-          await refreshConversations();
-          if (result.conversation_id) {
-            assistantView = "chat";
-            updateAssistantButtons();
-            await openConversation(result.conversation_id);
-          }
+          await streamRequest(
+            `/v1/schedules/${schedule.id}/trigger/stream`,
+            {},
+            async (streamEvent) => {
+              if (streamEvent.type === "start") {
+                targetConversationId = streamEvent.conversation_id;
+                requestId = streamEvent.request_id;
+                pendingConversationIds.add(targetConversationId);
+                conversationStreams.set(targetConversationId, {
+                  requestId,
+                  status: "pending",
+                  text: "",
+                  answer: "",
+                  error: "",
+                  waitingText: "正在执行日常安排…",
+                });
+                await refreshConversations();
+                assistantView = "chat";
+                updateAssistantButtons();
+                await openConversation(targetConversationId);
+                return;
+              }
+
+              if (!targetConversationId || !requestId) return;
+              const state = conversationStreams.get(targetConversationId);
+              if (!state || state.requestId !== requestId) return;
+              if (streamEvent.type === "delta") {
+                state.text += streamEvent.text || "";
+                renderConversationStream(targetConversationId);
+              }
+              if (streamEvent.type === "final") {
+                state.status = "completed";
+                state.answer = streamEvent.answer || state.text;
+                renderConversationStream(targetConversationId);
+              }
+              if (streamEvent.type === "error") {
+                throw new Error(streamEvent.error || "日常安排执行失败");
+              }
+            },
+          );
+          await Promise.all([refreshConversations(), loadSchedules()]);
         } catch (error) {
-          button.textContent = "执行失败";
-          setTimeout(() => setButtonBusy(button, false), 900);
+          if (targetConversationId && requestId) {
+            const state = conversationStreams.get(targetConversationId);
+            if (state?.requestId === requestId) {
+              state.status = "failed";
+              state.error = `日常安排执行失败：${error.message}`;
+              renderConversationStream(targetConversationId);
+            }
+          } else {
+            button.textContent = "执行失败";
+            setTimeout(() => setButtonBusy(button, false), 900);
+          }
           return;
+        } finally {
+          if (targetConversationId) pendingConversationIds.delete(targetConversationId);
+          renderConversationGroups();
+          updateComposerState();
         }
         setButtonBusy(button, false);
       });
@@ -810,8 +1156,11 @@
     conversations = [];
     schedules = [];
     pendingConversationIds = new Set();
+    conversationStreams.clear();
+    conversationLoadVersion += 1;
     conversationId = null;
     creatingConversation = false;
+    clearPendingAttachments();
     setTimeout(() => username.focus(), 50);
   }
 
@@ -923,6 +1272,52 @@
   chatInput.addEventListener("input", () => {
     chatInput.style.height = "auto";
     chatInput.style.height = `${Math.min(chatInput.scrollHeight, 120)}px`;
+    updateComposerState();
+  });
+
+  attachButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    attachmentMenu.hidden = !attachmentMenu.hidden;
+  });
+
+  attachmentMenu.querySelectorAll("[data-attach-kind]").forEach((button) => {
+    button.addEventListener("click", () => {
+      attachInputMode = button.dataset.attachKind;
+      attachmentInput.accept =
+        attachInputMode === "image"
+          ? "image/png,image/jpeg,image/gif,image/webp"
+          : "image/png,image/jpeg,image/gif,image/webp,text/*,.txt,.md,.log,.json,.csv";
+      attachmentMenu.hidden = true;
+      attachmentInput.click();
+    });
+  });
+
+  attachmentInput.addEventListener("change", () => {
+    void addFiles(attachmentInput.files ?? []);
+    attachmentInput.value = "";
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!attachmentMenu.hidden && !event.target.closest(".attach-wrap")) {
+      attachmentMenu.hidden = true;
+    }
+  });
+
+  ["dragenter", "dragover"].forEach((type) => {
+    messages.addEventListener(type, (event) => {
+      event.preventDefault();
+      messages.classList.add("drag-over");
+    });
+  });
+
+  ["dragleave", "drop"].forEach((type) => {
+    messages.addEventListener(type, (event) => {
+      event.preventDefault();
+      if (type === "drop") {
+        void addFiles(event.dataTransfer?.files ?? []);
+      }
+      messages.classList.remove("drag-over");
+    });
   });
 
   scheduleTabs.forEach((button) => {

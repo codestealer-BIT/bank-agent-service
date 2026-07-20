@@ -1007,10 +1007,17 @@ tbody tr:hover {
 }
 
 .messages {
+  position: relative;
   flex: 1;
   min-height: 0;
   padding-right: 4px;
   overflow: auto;
+}
+
+.messages.drag-over {
+  outline: 2px dashed #6a7be8;
+  outline-offset: -8px;
+  background: linear-gradient(135deg, rgba(82, 109, 226, 0.08), rgba(151, 87, 223, 0.08));
 }
 
 .welcome,
@@ -1104,12 +1111,127 @@ tbody tr:hover {
 
 .composer {
   display: flex;
+  flex-wrap: wrap;
   align-items: end;
   gap: 8px;
   padding: 7px 7px 7px 13px;
   border: 1px solid #dedfec;
   border-radius: 17px;
   background: #fbfbfe;
+}
+
+.attach-wrap {
+  position: relative;
+}
+
+.attach-button {
+  width: 38px;
+  height: 38px;
+  border: 1px solid #dfe2f2;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #5f51dd;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.attach-button:hover {
+  border-color: #bfc7f4;
+  background: #f5f7ff;
+}
+
+.attachment-menu {
+  position: absolute;
+  left: 0;
+  bottom: 48px;
+  z-index: 5;
+  width: 132px;
+  padding: 6px;
+  border: 1px solid #e2e4f1;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 16px 36px rgba(33, 39, 75, 0.16);
+}
+
+.attachment-menu button {
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #1f2744;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attachment-menu button:hover {
+  background: #f3f5ff;
+}
+
+.attachment-preview {
+  flex: 0 0 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 2px 0 4px;
+}
+
+.attachment-chip,
+.attachment-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(100%, 360px);
+  padding: 6px 8px;
+  border: 1px solid #e3e6f4;
+  border-radius: 12px;
+  background: #fff;
+  color: #202844;
+  font-size: 12px;
+}
+
+.attachment-chip img {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: #f3f4fb;
+}
+
+.attachment-file-icon {
+  display: grid;
+  width: 38px;
+  height: 32px;
+  place-items: center;
+  border-radius: 8px;
+  background: #eef3ff;
+  color: #3564d4;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.attachment-chip-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip button {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 50%;
+  background: #f0f2fa;
+  color: #68708c;
+  cursor: pointer;
+}
+
+.attachment-error {
+  border-color: #f3c9d5;
+  background: #fff6f9;
+  color: #b03d5b;
 }
 
 .composer textarea {

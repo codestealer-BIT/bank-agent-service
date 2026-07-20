@@ -22,7 +22,7 @@ const app = Fastify({
       "headers.authorization",
     ],
   },
-  bodyLimit: 128 * 1024,
+  bodyLimit: 32 * 1024 * 1024,
 });
 
 await app.register(cors, {
