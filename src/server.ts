@@ -7,6 +7,11 @@ import { corsOrigins, config } from "./config.js";
 import { closeDatabase, migrate, pool } from "./database.js";
 import { closeRedis, redis } from "./redis-leases.js";
 import { registerRoutes } from "./routes.js";
+import {
+  startMemoryReflectionWorker,
+  stopMemoryReflectionWorker,
+} from "./memory-reflection-service.js";
+import { startScheduleWorker, stopScheduleWorker } from "./schedule-service.js";
 
 const app = Fastify({
   logger: {
@@ -60,9 +65,13 @@ await registerRoutes(app);
 await migrate();
 await redis.ping();
 await pool.query("SELECT 1");
+startScheduleWorker();
+startMemoryReflectionWorker();
 
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, "shutting down");
+  stopScheduleWorker();
+  stopMemoryReflectionWorker();
   await app.close();
   await Promise.all([closeDatabase(), closeRedis()]);
   process.exit(0);

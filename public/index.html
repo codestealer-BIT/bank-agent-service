@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#17213b" />
-    <title>澄川银行 · 智能运维台</title>
+    <meta name="theme-color" content="#0d1733" />
+    <title>澄川银行 | 智能运维台</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -18,14 +18,14 @@
           <span class="eyebrow light">BANK INFRASTRUCTURE COPILOT</span>
           <h1>让基础设施状态<br />一眼可见，随问随答。</h1>
           <p>
-            集中查看机房与机器运行情况，并通过共享 Letta Agent
-            快速完成查询、汇总与经验沉淀。
+            统一查看机房与机器资产，并通过共享 Letta 智能体
+            完成巡检、汇总、知识沉淀与定时任务安排。
           </p>
         </div>
         <div class="showcase-points">
-          <div><span>01</span><b>资产总览</b><small>机房、主机与运行状态统一展示</small></div>
-          <div><span>02</span><b>智能查询</b><small>直接询问机器数量和异常情况</small></div>
-          <div><span>03</span><b>共享知识</b><small>沉淀脱敏且可复用的解决经验</small></div>
+          <div><span>01</span><b>资产总览</b><small>机房、主机、状态统一展示</small></div>
+          <div><span>02</span><b>智能运维</b><small>直接向共享智能体追问异常原因</small></div>
+          <div><span>03</span><b>计划执行</b><small>日常安排支持自动巡检任务</small></div>
         </div>
       </div>
 
@@ -33,17 +33,32 @@
         <div class="login-card">
           <span class="eyebrow">SECURE WORKSPACE</span>
           <h2 id="loginTitle">登录智能运维台</h2>
-          <p class="login-lead">使用演示账号进入基础设施资产视图</p>
+          <p class="login-lead">使用演示账号进入基础设施资产与智能运维工作台</p>
           <form id="loginForm" novalidate>
             <label for="username">登录账号</label>
-            <input id="username" name="username" autocomplete="username" placeholder="请输入账号" required />
+            <input
+              id="username"
+              name="username"
+              autocomplete="username"
+              placeholder="请输入账号"
+              required
+            />
             <label for="password">登录密码</label>
             <div class="password-wrap">
-              <input id="password" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required />
+              <input
+                id="password"
+                name="password"
+                type="password"
+                autocomplete="current-password"
+                placeholder="请输入密码"
+                required
+              />
               <button id="togglePassword" type="button">显示</button>
             </div>
             <div id="loginError" class="login-error" role="alert"></div>
-            <button id="loginButton" class="primary-button" type="submit"><span>安全登录</span><span>→</span></button>
+            <button id="loginButton" class="primary-button" type="submit">
+              <span>安全登录</span><span>→</span>
+            </button>
           </form>
           <div class="demo-access">
             <p>演示账号</p>
@@ -57,113 +72,325 @@
       </div>
     </section>
 
-    <div id="appShell" class="app-shell" hidden>
-      <header class="topbar">
-        <div class="brand">
+    <div id="appShell" class="workspace-shell" hidden>
+      <aside class="workspace-sidebar">
+        <div class="sidebar-brand">
           <span class="brand-mark">CC</span>
           <span><b>澄川银行</b><small>智能运维台</small></span>
         </div>
-        <nav>
-          <a class="active" href="#overview">资产概览</a>
-          <a href="#machines">机器列表</a>
-          <a href="#assistant">智能助手</a>
+
+        <nav class="workspace-nav" aria-label="主导航">
+          <button id="navInfrastructure" class="workspace-nav-item active" type="button">
+            <span class="workspace-nav-title">基础设施资产</span>
+            <span class="workspace-nav-copy">查看机房、主机与健康状态</span>
+          </button>
+          <button id="navAssistant" class="workspace-nav-item" type="button">
+            <span class="workspace-nav-title">智能运维助手</span>
+            <span class="workspace-nav-copy">会话、安排与智能巡检</span>
+          </button>
         </nav>
-        <div class="account-area">
-          <span class="live-pill"><i></i> 数据服务在线</span>
-          <span id="headerAvatar" class="avatar">A</span>
-          <span class="account-copy"><b id="headerName">用户</b><small id="headerUsername">@user</small></span>
-          <button id="logoutButton" class="logout-button" type="button">退出</button>
-        </div>
-      </header>
+      </aside>
 
-      <main class="dashboard">
-        <section id="overview" class="page-heading">
-          <div>
-            <span class="eyebrow">INFRASTRUCTURE OVERVIEW</span>
-            <h1>基础设施资产</h1>
-            <p>当前为演示数据，可按机房、状态、IP 或主机名快速筛选。</p>
+      <section class="workspace-main">
+        <header class="main-header">
+          <div class="account-area">
+            <span class="live-pill"><i></i> 数据服务在线</span>
+            <span id="headerAvatar" class="avatar">顾</span>
+            <span class="account-copy"><b id="headerName">用户</b><small id="headerUsername">@user</small></span>
+            <button id="logoutButton" class="logout-button" type="button">退出</button>
           </div>
-          <div class="heading-actions">
-            <button type="button" data-prompt="请汇总当前所有机房的机器运行情况">让 AI 汇总</button>
-            <button class="primary" type="button" data-open-agent>询问智能助手</button>
-          </div>
-        </section>
+        </header>
 
-        <section class="summary-grid" aria-label="资产统计">
-          <article><span class="summary-icon blue">DC</span><div><small>机房数量</small><strong id="datacenterCount">--</strong><p>当前筛选范围</p></div></article>
-          <article><span class="summary-icon purple">IP</span><div><small>机器总数</small><strong id="machineCount">--</strong><p>虚构演示资产</p></div></article>
-          <article><span class="summary-icon green">✓</span><div><small>正常运行</small><strong id="healthyCount">--</strong><p>心跳与指标正常</p></div></article>
-          <article><span class="summary-icon amber">!</span><div><small>异常机器</small><strong id="issueCount">--</strong><p>告警与离线合计</p></div></article>
-        </section>
+        <main class="page-stack">
+          <section id="infrastructurePage" class="page-section active">
+            <section class="summary-grid" aria-label="资产统计">
+              <article>
+                <span class="summary-icon blue">DC</span>
+                <div><small>机房数量</small><strong id="datacenterCount">--</strong><p>当前筛选范围</p></div>
+              </article>
+              <article>
+                <span class="summary-icon purple">IP</span>
+                <div><small>机器总数</small><strong id="machineCount">--</strong><p>虚构演示资产</p></div>
+              </article>
+              <article>
+                <span class="summary-icon green">✓</span>
+                <div><small>正常运行</small><strong id="healthyCount">--</strong><p>心跳与指标正常</p></div>
+              </article>
+              <article>
+                <span class="summary-icon amber">!</span>
+                <div><small>异常机器</small><strong id="issueCount">--</strong><p>告警与离线合计</p></div>
+              </article>
+            </section>
 
-        <section id="machines" class="asset-panel">
-          <div class="panel-heading">
-            <div><h2>机器列表</h2><p>一行一台机器，状态数据由演示接口实时返回</p></div>
-            <span id="resultCount" class="result-count">正在加载…</span>
-          </div>
-
-          <div class="filters">
-            <div class="filter-group datacenter-filter">
-              <label>所属机房</label>
-              <div class="filter-actions">
-                <button id="selectAllDatacenters" type="button">全选机房</button>
-                <button id="clearDatacenters" type="button">清空</button>
+            <section id="machines" class="asset-panel">
+              <div class="panel-heading">
+                <div>
+                  <h2>机器列表</h2>
+                  <p>一行一台机器，状态数据由演示接口实时返回</p>
+                </div>
+                <div class="panel-heading-actions">
+                  <button type="button" data-prompt="请总结当前所有机房的机器运行情况">让 AI 汇总</button>
+                </div>
               </div>
-              <div id="datacenterFilters" class="datacenter-options"></div>
-            </div>
-            <div class="filter-control">
-              <label for="statusFilter">运行状态</label>
-              <select id="statusFilter">
-                <option value="">全部状态</option>
-                <option value="healthy">正常</option>
-                <option value="warning">告警</option>
-                <option value="offline">离线</option>
-              </select>
-            </div>
-            <div class="filter-control search-control">
-              <label for="machineSearch">搜索资产</label>
-              <input id="machineSearch" type="search" placeholder="IP、主机名、机柜或用途" />
-            </div>
-          </div>
 
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>运行状态</th>
-                  <th>IP 地址</th>
-                  <th>主机名</th>
-                  <th>所属机房</th>
-                  <th>机柜</th>
-                  <th>用途</th>
-                  <th>CPU</th>
-                  <th>内存</th>
-                  <th>最近心跳</th>
-                </tr>
-              </thead>
-              <tbody id="machineRows"></tbody>
-            </table>
-            <div id="emptyState" class="empty-state" hidden>没有符合当前筛选条件的机器。</div>
-          </div>
-        </section>
+              <div class="filters">
+                <div class="filter-group datacenter-filter">
+                  <label>所属机房</label>
+                  <div class="filter-actions">
+                    <button id="selectAllDatacenters" type="button">全选机房</button>
+                    <button id="clearDatacenters" type="button">清空</button>
+                  </div>
+                  <div id="datacenterFilters" class="datacenter-options"></div>
+                </div>
+                <div class="filter-control">
+                  <label for="statusFilter">运行状态</label>
+                  <select id="statusFilter">
+                    <option value="">全部状态</option>
+                    <option value="healthy">正常</option>
+                    <option value="warning">告警</option>
+                    <option value="offline">离线</option>
+                  </select>
+                </div>
+                <div class="filter-control search-control">
+                  <label for="machineSearch">搜索资产</label>
+                  <input id="machineSearch" type="search" placeholder="IP、主机名、机柜或用途" />
+                </div>
+              </div>
 
-        <section id="assistant" class="assistant-banner">
-          <div>
-            <span class="eyebrow light">SHARED LETTA AGENT</span>
-            <h2>不用手工统计，直接向助手提问</h2>
-            <p>所有用户共享同一个 Agent，但每位用户仍可创建多个独立 conversation。</p>
-          </div>
-          <div class="prompt-grid">
-            <button type="button" data-prompt="北京核心机房有多少台机器？运行情况怎么样？">北京机房运行概览</button>
-            <button type="button" data-prompt="列出目前所有告警和离线的机器，并按机房分组">查看异常机器</button>
-            <button type="button" data-prompt="哪台机器的 CPU 使用率最高？请给出 IP、机房和用途">查询最高 CPU</button>
-          </div>
-        </section>
-      </main>
-      <footer><span>© 2026 澄川银行智能研发实验室</span><span>Shared Letta Agent · Public Infrastructure API · Redis Concurrency</span></footer>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>运行状态</th>
+                      <th>IP 地址</th>
+                      <th>主机名</th>
+                      <th>所属机房</th>
+                      <th>机柜</th>
+                      <th>用途</th>
+                      <th>CPU</th>
+                      <th>内存</th>
+                      <th>最近心跳</th>
+                    </tr>
+                  </thead>
+                  <tbody id="machineRows"></tbody>
+                </table>
+                <div id="emptyState" class="empty-state" hidden>没有符合条件的机器。</div>
+              </div>
+            </section>
+          </section>
+
+          <section id="assistantPage" class="page-section assistant-page" hidden>
+            <div class="agent-shell">
+              <aside class="agent-sidebar">
+                <div class="agent-profile">
+                  <div class="agent-avatar">◎</div>
+                  <div>
+                    <b>智能运维助手</b>
+                    <span>共享智能体</span>
+                  </div>
+                </div>
+
+                <div class="agent-sidebar-actions">
+                  <button id="assistantSchedulesTab" class="agent-sidebar-button active" type="button">
+                    <span>日常安排</span>
+                  </button>
+                  <button id="assistantNewChat" class="agent-sidebar-button" type="button">
+                    <span>新建会话</span>
+                  </button>
+                </div>
+
+                <div class="conversation-groups">
+                  <section>
+                    <h3>置顶会话</h3>
+                    <div id="pinnedConversations" class="conversation-list"></div>
+                  </section>
+                  <section>
+                    <h3>历史会话</h3>
+                    <div id="chatConversations" class="conversation-list"></div>
+                  </section>
+                </div>
+              </aside>
+
+              <section class="agent-main">
+                <div id="chatWorkspace" class="agent-pane" hidden>
+                  <div class="chat-toolbar">
+                    <div>
+                      <span class="eyebrow">专属会话</span>
+                      <h2 id="conversationHeading">智能运维会话</h2>
+                    </div>
+                    <button id="chatRefreshButton" class="ghost-button" type="button">刷新历史</button>
+                  </div>
+
+                  <div id="messages" class="messages"></div>
+
+                  <div class="composer-wrap">
+                    <div class="suggestions" id="assistantSuggestions"></div>
+                    <form id="chatComposer" class="composer">
+                      <textarea
+                        id="chatInput"
+                        rows="1"
+                        maxlength="32000"
+                        placeholder="输入你的问题…"
+                      ></textarea>
+                      <button id="sendButton" class="send" aria-label="发送" type="submit">↑</button>
+                    </form>
+                    <p class="hint">演示环境，重要操作仍需人工确认。</p>
+                  </div>
+                </div>
+
+                <div id="scheduleWorkspace" class="agent-pane active">
+                  <div class="schedule-toolbar">
+                    <div class="schedule-tabs">
+                      <button class="schedule-tab active" data-filter="all" type="button">全部</button>
+                      <button class="schedule-tab" data-filter="recurring" type="button">定期安排</button>
+                      <button class="schedule-tab" data-filter="one_off" type="button">一次安排</button>
+                    </div>
+                    <button id="createScheduleButton" class="ghost-button" type="button">
+                      + 新建安排
+                    </button>
+                  </div>
+
+                  <section class="schedule-section">
+                    <div class="section-label">
+                      <h3>我的日常安排</h3>
+                      <p>这些安排会在后台按时触发，并以新会话的方式交给共享智能体执行。</p>
+                    </div>
+                    <div id="scheduleList" class="schedule-list"></div>
+                  </section>
+
+                  <section class="schedule-section">
+                    <div class="section-label">
+                      <h3>推荐安排</h3>
+                      <p>先从常见运维场景开始，再按需改写提示词。</p>
+                    </div>
+                    <div id="scheduleTemplates" class="template-grid"></div>
+                  </section>
+                </div>
+              </section>
+            </div>
+          </section>
+        </main>
+      </section>
     </div>
 
-    <script src="/widget.js" defer></script>
+    <div id="scheduleModal" class="modal-backdrop" hidden>
+      <section class="schedule-modal" aria-labelledby="scheduleModalTitle">
+        <header class="schedule-modal-head">
+          <div>
+            <h2 id="scheduleModalTitle">新建安排</h2>
+            <p>设置任务名称、执行提示词与时间规则。</p>
+          </div>
+          <button id="closeScheduleModal" class="icon-button" type="button">×</button>
+        </header>
+
+        <form id="scheduleForm" class="schedule-form">
+          <input id="scheduleTemplateKey" type="hidden" />
+          <input id="scheduleId" type="hidden" />
+
+          <label class="schedule-field">
+            <span>任务名称</span>
+            <input id="scheduleName" maxlength="120" placeholder="例如：每周风险摘要" required />
+          </label>
+
+          <label class="schedule-field">
+            <span>描述</span>
+            <input id="scheduleDescription" maxlength="240" placeholder="例如：每周一生成上周异常资产总结" />
+          </label>
+
+          <label class="schedule-field schedule-field-large">
+            <span>任务提示词</span>
+            <textarea
+              id="schedulePrompt"
+              rows="8"
+              maxlength="8000"
+              placeholder="请描述希望智能运维助手在定时触发时完成的任务…"
+              required
+            ></textarea>
+          </label>
+
+          <div class="schedule-form-grid">
+            <label class="schedule-field">
+              <span>运行环境</span>
+              <select id="scheduleEnvironment" disabled>
+                <option value="bank-runtime">本地运行环境</option>
+              </select>
+            </label>
+
+            <label class="schedule-field">
+              <span>会话目标</span>
+              <select id="scheduleConversation" disabled>
+                <option value="new">新建会话</option>
+              </select>
+            </label>
+
+            <label class="schedule-field">
+              <span>任务类型</span>
+              <select id="scheduleType">
+                <option value="recurring">定期安排</option>
+                <option value="one_off">一次安排</option>
+              </select>
+            </label>
+
+            <label id="recurrenceKindField" class="schedule-field">
+              <span>重复规则</span>
+              <select id="scheduleRecurrenceKind">
+                <option value="daily">每天</option>
+                <option value="weekdays">工作日</option>
+                <option value="weekly">每周</option>
+              </select>
+            </label>
+
+            <label id="weekdayField" class="schedule-field">
+              <span>星期</span>
+              <select id="scheduleWeekday">
+                <option value="1">周一</option>
+                <option value="2">周二</option>
+                <option value="3">周三</option>
+                <option value="4">周四</option>
+                <option value="5">周五</option>
+                <option value="6">周六</option>
+                <option value="0">周日</option>
+              </select>
+            </label>
+
+            <label id="timeField" class="schedule-field">
+              <span>执行时间</span>
+              <input id="scheduleTime" type="time" value="09:00" required />
+            </label>
+
+            <label id="oneOffField" class="schedule-field schedule-field-wide" hidden>
+              <span>执行日期时间</span>
+              <input id="scheduleDateTime" type="datetime-local" />
+            </label>
+
+            <label id="emailRecipientField" class="schedule-field schedule-field-wide" hidden>
+              <span>收件邮箱</span>
+              <input
+                id="scheduleEmailRecipient"
+                type="email"
+                maxlength="254"
+                autocomplete="email"
+                placeholder="例如：operations@example.com"
+              />
+              <small>该地址只绑定到当前邮件安排，智能体无法在执行时修改。</small>
+            </label>
+          </div>
+
+          <div id="scheduleError" class="login-error"></div>
+
+          <footer class="schedule-modal-actions">
+            <button id="deleteScheduleButton" class="danger-link" type="button" hidden>删除</button>
+            <div class="modal-primary-actions">
+              <button id="cancelScheduleButton" class="ghost-button" type="button">取消</button>
+              <button id="submitScheduleButton" class="primary-dark-button" type="submit">
+                新建安排
+              </button>
+            </div>
+          </footer>
+        </form>
+      </section>
+    </div>
+
     <script src="/app.js" defer></script>
   </body>
 </html>

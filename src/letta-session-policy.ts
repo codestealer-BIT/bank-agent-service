@@ -8,7 +8,10 @@ const HEADLESS_SAFE_TOOLS = new Set([
   "list_machines",
   "get_machine_status",
   "get_infrastructure_summary",
+  "send_email",
   "submit_shared_knowledge_candidate",
+  "memory_search",
+  "memory_save",
 ]);
 
 export function resolveHeadlessToolApproval(

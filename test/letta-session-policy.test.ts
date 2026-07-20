@@ -1,19 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { OPERATIONS_TOOL_NAMES } from "../src/agent-tools.js";
 import {
   ApprovalConflictError,
   resolveHeadlessToolApproval,
 } from "../src/letta-session-policy.js";
 
 test("allows only the registered operations tools", () => {
-  assert.equal(
-    resolveHeadlessToolApproval("list_machines").behavior,
-    "allow",
-  );
-  assert.equal(
-    resolveHeadlessToolApproval("get_infrastructure_summary").behavior,
-    "allow",
-  );
+  for (const toolName of OPERATIONS_TOOL_NAMES) {
+    assert.equal(resolveHeadlessToolApproval(toolName).behavior, "allow");
+  }
+  assert.ok(OPERATIONS_TOOL_NAMES.includes("send_email"));
   assert.equal(resolveHeadlessToolApproval("EnterPlanMode").behavior, "deny");
   assert.equal(resolveHeadlessToolApproval("ExitPlanMode").behavior, "deny");
 });

@@ -20,6 +20,15 @@ import {
   filterMachines,
   infrastructureSummary,
 } from "./infrastructure.js";
+import {
+  createSchedule,
+  deleteSchedule,
+  listSchedules,
+  scheduleLabel,
+  triggerScheduleNow,
+  updateSchedule,
+  type RecurrenceKind,
+} from "./schedule-service.js";
 
 const loginBody = z.object({
   username: z
@@ -41,6 +50,79 @@ const messageBody = z.object({
   request_id: z.string().trim().min(1).max(128).optional(),
 });
 
+const scheduleBodyShape = {
+  name: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(240).default(""),
+  prompt: z.string().trim().min(1).max(8_000),
+  category: z.string().trim().min(1).max(60).default("custom"),
+  icon: z.string().trim().min(1).max(30).default("spark"),
+  accent: z.string().trim().min(1).max(30).default("violet"),
+  schedule_type: z.enum(["recurring", "one_off"]),
+  recurrence_kind: z.enum(["daily", "weekdays", "weekly"]).optional().nullable(),
+  weekday: z.coerce.number().int().min(0).max(6).optional().nullable(),
+  hour: z.coerce.number().int().min(0).max(23),
+  minute: z.coerce.number().int().min(0).max(59),
+  scheduled_for: z.string().datetime().optional().nullable(),
+  recipient_email: z.string().trim().email().optional().nullable(),
+  timezone: z.string().trim().min(1).max(80).default("Asia/Shanghai"),
+  enabled: z.boolean().optional(),
+};
+
+const schedulePatchBody = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  description: z.string().trim().max(240).optional(),
+  prompt: z.string().trim().min(1).max(8_000).optional(),
+  category: z.string().trim().min(1).max(60).optional(),
+  icon: z.string().trim().min(1).max(30).optional(),
+  accent: z.string().trim().min(1).max(30).optional(),
+  schedule_type: z.enum(["recurring", "one_off"]).optional(),
+  recurrence_kind: z.enum(["daily", "weekdays", "weekly"]).optional().nullable(),
+  weekday: z.coerce.number().int().min(0).max(6).optional().nullable(),
+  hour: z.coerce.number().int().min(0).max(23).optional(),
+  minute: z.coerce.number().int().min(0).max(59).optional(),
+  scheduled_for: z.string().datetime().optional().nullable(),
+  recipient_email: z.string().trim().email().optional().nullable(),
+  timezone: z.string().trim().min(1).max(80).optional(),
+  enabled: z.boolean().optional(),
+});
+
+const scheduleBody = z
+  .object(scheduleBodyShape)
+  .superRefine((value, ctx) => {
+    if (value.schedule_type === "recurring" && !value.recurrence_kind) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["recurrence_kind"],
+        message: "Recurring schedule requires recurrence_kind",
+      });
+    }
+    if (
+      value.schedule_type === "recurring" &&
+      value.recurrence_kind === "weekly" &&
+      value.weekday == null
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["weekday"],
+        message: "Weekly schedule requires weekday",
+      });
+    }
+    if (value.schedule_type === "one_off" && !value.scheduled_for) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["scheduled_for"],
+        message: "One-off schedule requires scheduled_for",
+      });
+    }
+    if (value.category === "daily-email-report" && !value.recipient_email) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["recipient_email"],
+        message: "Email schedule requires recipient_email",
+      });
+    }
+  });
+
 type ConversationRow = {
   id: string;
   user_id: string;
@@ -60,6 +142,71 @@ type TurnRow = {
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => ({ status: "ok" }));
+
+  app.get("/v1/schedules/templates", async () => ({
+    templates: [
+      {
+        key: "daily-overview",
+        category: "常规巡检",
+        icon: "heart",
+        accent: "coral",
+        name: "每日健康巡检",
+        description: "每天自动总结基础设施整体健康状况。",
+        prompt:
+          "请汇总当前所有机房的机器数量、正常/告警/离线分布，并指出最值得关注的异常资产。",
+        schedule_type: "recurring",
+        recurrence_kind: "daily",
+        weekday: null,
+        hour: 9,
+        minute: 0,
+      },
+      {
+        key: "weekly-risk",
+        category: "周报摘要",
+        icon: "spark",
+        accent: "mint",
+        name: "周风险摘要",
+        description: "每周一早上汇总上周高风险资产与异常趋势。",
+        prompt:
+          "请总结上周所有告警与离线机器，按机房分组，突出高 CPU、高内存与多次离线的重点机器。",
+        schedule_type: "recurring",
+        recurrence_kind: "weekly",
+        weekday: 1,
+        hour: 9,
+        minute: 0,
+      },
+      {
+        key: "weekday-brief",
+        category: "交接简报",
+        icon: "calendar",
+        accent: "gold",
+        name: "工作日收盘简报",
+        description: "每个工作日收盘前生成运维简报。",
+        prompt:
+          "请生成今日运维简报：包含异常机器、重点机房、需要明天继续跟进的事项。",
+        schedule_type: "recurring",
+        recurrence_kind: "weekdays",
+        weekday: null,
+        hour: 18,
+        minute: 0,
+      },
+      {
+        key: "daily-email-report",
+        category: "邮件报告",
+        icon: "mail",
+        accent: "blue",
+        name: "每日运维邮件",
+        description: "每天汇总基础设施运行情况并发送到预设邮箱。",
+        prompt:
+          "请先调用基础设施查询工具汇总全部机房的机器数量、正常/告警/离线分布与重点异常。确认内容不包含密码、密钥、客户数据或其他敏感信息后，调用 send_email 工具发送一封纯文本邮件。邮件主题为“澄川银行每日运维简报”，正文应简洁列出总体状态、重点异常和建议跟进事项。每次执行只能发送一封邮件。",
+        schedule_type: "recurring",
+        recurrence_kind: "daily",
+        weekday: null,
+        hour: 18,
+        minute: 0,
+      },
+    ],
+  }));
 
   app.get("/v1/infrastructure/datacenters", async () => ({
     datacenters,
@@ -134,6 +281,108 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/v1/auth/me", async (request) => ({
     user: await getAuthenticatedUser(request),
   }));
+
+  app.get("/v1/schedules", async (request) => {
+    const userId = await getAuthenticatedUserId(request);
+    const schedules = await listSchedules(userId);
+    return {
+      schedules: schedules.map((schedule) => ({
+        ...schedule,
+        schedule_label: scheduleLabel(schedule),
+      })),
+    };
+  });
+
+  app.post("/v1/schedules", async (request, reply) => {
+    const userId = await getAuthenticatedUserId(request);
+    const body = scheduleBody.parse(request.body ?? {});
+    const schedule = await createSchedule({
+      userId,
+      name: body.name,
+      description: body.description,
+      prompt: body.prompt,
+      category: body.category,
+      icon: body.icon,
+      accent: body.accent,
+      scheduleType: body.schedule_type,
+      recurrenceKind: body.recurrence_kind as RecurrenceKind | null | undefined,
+      weekday: body.weekday,
+      hour: body.hour,
+      minute: body.minute,
+      scheduledFor: body.scheduled_for ? new Date(body.scheduled_for) : null,
+      recipientEmail: body.recipient_email,
+      timezone: body.timezone,
+    });
+    return reply.code(201).send({
+      ...schedule,
+      schedule_label: scheduleLabel(schedule),
+    });
+  });
+
+  app.patch<{ Params: { scheduleId: string } }>(
+    "/v1/schedules/:scheduleId",
+    async (request, reply) => {
+      const userId = await getAuthenticatedUserId(request);
+      const scheduleId = z.string().uuid().parse(request.params.scheduleId);
+      const body = schedulePatchBody.parse(request.body ?? {});
+      const schedule = await updateSchedule(userId, scheduleId, {
+        name: body.name,
+        description: body.description,
+        prompt: body.prompt,
+        category: body.category,
+        icon: body.icon,
+        accent: body.accent,
+        scheduleType: body.schedule_type,
+        recurrenceKind: body.recurrence_kind as RecurrenceKind | null | undefined,
+        weekday: body.weekday,
+        hour: body.hour,
+        minute: body.minute,
+        scheduledFor:
+          typeof body.scheduled_for === "string"
+            ? new Date(body.scheduled_for)
+            : body.scheduled_for,
+        recipientEmail: body.recipient_email,
+        timezone: body.timezone,
+        enabled: body.enabled,
+      });
+      if (!schedule) {
+        return reply.code(404).send({ error: "Schedule not found" });
+      }
+      return {
+        ...schedule,
+        schedule_label: scheduleLabel(schedule),
+      };
+    },
+  );
+
+  app.delete<{ Params: { scheduleId: string } }>(
+    "/v1/schedules/:scheduleId",
+    async (request, reply) => {
+      const userId = await getAuthenticatedUserId(request);
+      const scheduleId = z.string().uuid().parse(request.params.scheduleId);
+      const deleted = await deleteSchedule(userId, scheduleId);
+      if (!deleted) {
+        return reply.code(404).send({ error: "Schedule not found" });
+      }
+      return reply.code(204).send();
+    },
+  );
+
+  app.post<{ Params: { scheduleId: string } }>(
+    "/v1/schedules/:scheduleId/trigger",
+    async (request, reply) => {
+      const userId = await getAuthenticatedUserId(request);
+      const scheduleId = z.string().uuid().parse(request.params.scheduleId);
+      const triggered = await triggerScheduleNow(userId, scheduleId);
+      if (!triggered.found) {
+        return reply.code(404).send({ error: "Schedule not found" });
+      }
+      return reply.code(202).send({
+        accepted: true,
+        conversation_id: triggered.conversationId,
+      });
+    },
+  );
 
   app.post("/v1/auth/logout", async (request, reply) => {
     await destroyAuthenticatedSession(request, reply);
@@ -301,7 +550,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const userId = await getAuthenticatedUserId(request);
     const agentId = await getOrCreateUserAgent(userId);
     try {
-      return { agent_id: agentId, files: await readUserMemory(agentId) };
+      return { agent_id: agentId, files: await readUserMemory(agentId, userId) };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         return { agent_id: agentId, files: [] };

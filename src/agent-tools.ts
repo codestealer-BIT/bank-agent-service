@@ -8,6 +8,8 @@ import {
   infrastructureSummary,
 } from "./infrastructure.js";
 import { containsSensitiveKnowledge, normalizeTags } from "./knowledge-policy.js";
+import { sendConfiguredEmail } from "./mail-service.js";
+import { saveMemory, searchMemory } from "./memory-service.js";
 
 function jsonResult(value: unknown) {
   return {
@@ -38,16 +40,96 @@ const knowledgeInput = z.object({
   contains_private_data: z.boolean(),
 });
 
+const emailInput = z.object({
+  subject: z.string().trim().min(1).max(160),
+  body: z.string().trim().min(1).max(20_000),
+});
+
+const memorySearchInput = z.object({
+  query: z.string().trim().min(1).max(1_000),
+  limit: z.number().int().min(1).max(8).optional(),
+});
+
+const memorySaveInput = z.object({
+  scope: z.enum(["private", "shared"]).default("private"),
+  content: z.string().trim().min(3).max(2_000),
+  category: z.string().trim().min(1).max(80).optional(),
+  tags: z.array(z.string()).max(8).optional(),
+});
+
 export const OPERATIONS_TOOL_NAMES = [
   "list_datacenters",
   "list_machines",
   "get_machine_status",
   "get_infrastructure_summary",
+  "send_email",
   "submit_shared_knowledge_candidate",
+  "memory_search",
+  "memory_save",
 ];
 
-export function createOperationsTools(userId: string): AnyAgentTool[] {
+export function createOperationsTools(
+  userId: string,
+  agentId: string,
+  options: { emailRecipient?: string | null } = {},
+): AnyAgentTool[] {
   return [
+    {
+      label: "Memory search",
+      name: "memory_search",
+      description:
+        "Search the current user's private MemFS plus shared bank operations memory. Use this before answering when the user's question may relate to durable preferences, prior work, or remembered operations knowledge.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          limit: { type: "integer", minimum: 1, maximum: 8 },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      async execute(_toolCallId, args) {
+        const input = memorySearchInput.parse(args);
+        return jsonResult(
+          await searchMemory({
+            agentId,
+            userId,
+            query: input.query,
+            limit: input.limit,
+          }),
+        );
+      },
+    },
+    {
+      label: "Memory save",
+      name: "memory_save",
+      description:
+        "Write a concise long-term memory to MemFS. Use private for user-specific facts, preferences, and work context. Use shared only for reusable bank operations lessons that contain no private or sensitive data. Never store passwords, keys, tokens, authorization codes, customer data, or raw conversation transcripts.",
+      parameters: {
+        type: "object",
+        properties: {
+          scope: { type: "string", enum: ["private", "shared"] },
+          content: { type: "string" },
+          category: { type: "string" },
+          tags: { type: "array", items: { type: "string" } },
+        },
+        required: ["content"],
+        additionalProperties: false,
+      },
+      async execute(_toolCallId, args) {
+        const input = memorySaveInput.parse(args);
+        return jsonResult(
+          await saveMemory({
+            agentId,
+            userId,
+            scope: input.scope,
+            content: input.content,
+            category: input.category,
+            tags: input.tags,
+          }),
+        );
+      },
+    },
     {
       label: "机房列表",
       name: "list_datacenters",
@@ -136,6 +218,40 @@ export function createOperationsTools(userId: string): AnyAgentTool[] {
       },
     },
     {
+      label: "发送运维邮件",
+      name: "send_email",
+      description:
+        "向当前日常安排绑定的收件邮箱发送纯文本邮件；普通对话则使用管理员预设的默认收件人。仅在用户明确要求发信或日常安排明确要求发送报告时调用；不得发送密码、密钥、客户数据或其他敏感信息。收件人由后端注入，模型无法修改。",
+      parameters: {
+        type: "object",
+        properties: {
+          subject: { type: "string", minLength: 1, maxLength: 160 },
+          body: { type: "string", minLength: 1, maxLength: 20_000 },
+        },
+        required: ["subject", "body"],
+        additionalProperties: false,
+      },
+      async execute(_toolCallId, args) {
+        const input = emailInput.parse(args);
+        try {
+          const result = await sendConfiguredEmail(input, options.emailRecipient);
+          return jsonResult({
+            sent: true,
+            message_id: result.messageId,
+            recipient_policy: "fixed_by_server",
+          });
+        } catch (error) {
+          return jsonResult({
+            sent: false,
+            error:
+              error instanceof Error
+                ? error.message
+                : "邮件发送失败，请稍后重试。",
+          });
+        }
+      },
+    },
+    {
       label: "提交公共知识候选",
       name: "submit_shared_knowledge_candidate",
       description:
@@ -166,11 +282,11 @@ export function createOperationsTools(userId: string): AnyAgentTool[] {
             reason: "Candidate contains private or sensitive information.",
           });
         }
-        const result = await pool.query<{ id: string }>(
+        await pool.query(
           `INSERT INTO knowledge_candidates(
              source_user_id, title, problem, reusable_solution, tags, status
            ) VALUES ($1, $2, $3, $4, $5, 'pending')
-           RETURNING id`,
+          `,
           [
             userId,
             input.title,
@@ -179,10 +295,13 @@ export function createOperationsTools(userId: string): AnyAgentTool[] {
             normalizeTags(input.tags),
           ],
         );
+        // Candidate identifiers and review state are backend audit metadata.
+        // The model only needs to know whether the silent submission succeeded;
+        // exposing internal IDs encourages it to repeat implementation details
+        // in the user-facing answer.
         return jsonResult({
           accepted: true,
-          candidate_id: result.rows[0].id,
-          status: "pending_review",
+          user_notification_required: false,
         });
       },
     },

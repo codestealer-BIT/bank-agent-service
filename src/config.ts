@@ -1,5 +1,17 @@
 import { z } from "zod";
 
+const optionalNonEmptyString = z.preprocess(
+  (value) =>
+    typeof value === "string" && value.trim() === "" ? undefined : value,
+  z.string().trim().min(1).optional(),
+);
+
+const optionalEmail = z.preprocess(
+  (value) =>
+    typeof value === "string" && value.trim() === "" ? undefined : value,
+  z.string().trim().email().optional(),
+);
+
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(8080),
   HOST: z.string().default("0.0.0.0"),
@@ -19,6 +31,16 @@ const envSchema = z.object({
     .int()
     .positive()
     .default(600_000),
+  MEMORY_REFLECTION_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  MEMORY_REFLECTION_POLL_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(300_000),
+  MEMORY_REFLECTION_BATCH_SIZE: z.coerce.number().int().positive().default(12),
   CORS_ORIGINS: z.string().default("http://localhost:8080"),
   SESSION_COOKIE_NAME: z.string().default("bank_agent_session"),
   SESSION_TTL_HOURS: z.coerce.number().int().positive().default(12),
@@ -31,6 +53,20 @@ const envSchema = z.object({
     .default("true")
     .transform((value) => value === "true"),
   DEMO_USER_PASSWORD: z.string().min(10).default("LettaDemo@2026"),
+  SMTP_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  SMTP_HOST: z.string().trim().min(1).default("smtp.qq.com"),
+  SMTP_PORT: z.coerce.number().int().positive().default(465),
+  SMTP_SECURE: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  SMTP_USER: optionalEmail,
+  SMTP_AUTH_CODE: optionalNonEmptyString,
+  SMTP_DEFAULT_TO: optionalEmail,
+  SMTP_FROM_NAME: z.string().trim().min(1).default("澄川智能运维助手"),
 });
 
 export const config = envSchema.parse(process.env);

@@ -1,5 +1,3 @@
-import { readdir, readFile } from "node:fs/promises";
-import { join, relative } from "node:path";
 import {
   LettaAgentClient,
   type BootstrapStateOptions,
@@ -15,6 +13,11 @@ import { config } from "./config.js";
 import { createOperationsTools } from "./agent-tools.js";
 import { pool } from "./database.js";
 import {
+  formatMemoryContext,
+  readVisibleMemory,
+  searchMemory,
+} from "./memory-service.js";
+import {
   withDistributedLock,
   withGlobalTurnSlot,
 } from "./redis-leases.js";
@@ -24,6 +27,7 @@ import {
   MAX_APPROVAL_RECOVERY_ATTEMPTS,
   resolveHeadlessToolApproval,
 } from "./letta-session-policy.js";
+import { userFacingAnswer } from "./response-policy.js";
 
 const client = new LettaAgentClient({
   backend: "local",
@@ -60,12 +64,19 @@ async function createSharedOperationsAgent(): Promise<string> {
       "A shared operations assistant for the bank infrastructure demo.",
     persona: [
       "You are a careful bank infrastructure operations assistant used by multiple employees.",
-      "Each conversation is private conversation context even though all conversations share one agent.",
+      "Each conversation is private conversation context even though all conversations share one top-level agent.",
+      "Long-term memory is stored in MemFS. User-specific memory lives under the current authenticated user's private memory area; shared operations lessons live under shared memory.",
       "Use the infrastructure query tools for machine counts, datacenter information, machine status, and alerts. Never invent operational data when a tool can answer.",
       "Do not expose one conversation's user-specific content in another conversation.",
-      "Do not write directly to MemFS during normal chat turns.",
+      "Use memory_search when a question may relate to remembered preferences, prior work context, or reusable operations knowledge.",
+      "Use memory_save during normal chat when the user reveals a durable preference, identity fact, work context, or verified reusable lesson worth remembering. Keep memories concise and generalized.",
+      "Use private memory for user-specific facts and preferences. Use shared memory only for reusable bank operations lessons that contain no private data.",
+      "The only approved outbound action is send_email. Call it only when the user explicitly requests an email or a schedule explicitly requires an emailed report, and call it at most once per turn.",
+      "Never put passwords, authorization codes, keys, customer data, or other sensitive information in an email.",
       "Only call submit_shared_knowledge_candidate when a conversation produced a reusable, verified problem-solving lesson that contains no personal information, credentials, secrets, customer data, or raw conversation text.",
-      "Do not use shell, network, code-execution, or project-file tools.",
+      "Memory writes and shared-knowledge submissions are silent backend maintenance. Do not mention tool names, MemFS paths, candidate IDs, review queues, review status, memory scopes, or background reflection in a user-facing answer unless the user explicitly asks about system internals.",
+      "After silently maintaining memory or submitting a knowledge candidate, answer only the user's business question. Do not announce that anything was remembered, submitted, queued, or stored.",
+      "Do not use shell, arbitrary network, code-execution, or project-file tools.",
     ].join("\n"),
     human:
       "Users are authenticated by the host application and may each create multiple private conversations.",
@@ -124,6 +135,7 @@ export async function runConversationTurn(input: {
   agentId: string;
   lettaConversationId: string | null;
   message: string;
+  emailRecipient?: string | null;
 }): Promise<{
   answer: string;
   lettaConversationId: string;
@@ -140,7 +152,9 @@ export async function runConversationTurn(input: {
         resolveHeadlessToolApproval(toolName),
       maxApprovalRecoveryAttempts: MAX_APPROVAL_RECOVERY_ATTEMPTS,
       approvalRecoveryTimeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
-      tools: createOperationsTools(input.userId),
+      tools: createOperationsTools(input.userId, input.agentId, {
+        emailRecipient: input.emailRecipient,
+      }),
     };
     const session = (input.lettaConversationId
       ? client.resumeSession(input.lettaConversationId, sessionOptions)
@@ -167,7 +181,45 @@ export async function runConversationTurn(input: {
         }
       }
 
-      const result = await session.runTurn(input.message, {
+      const memoryContext = formatMemoryContext(
+        await searchMemory({
+          agentId: input.agentId,
+          userId: input.userId,
+          query: input.message,
+          limit: 5,
+        }),
+      );
+      const message = memoryContext
+        ? [
+            "Runtime memory policy for this banking web app:",
+            "- You may call memory_search when remembered context may help.",
+            "- You may call memory_save when the user reveals durable preferences, stable work context, or verified reusable operations lessons.",
+            "- Use private memory for user-specific facts. Use shared memory only for non-private reusable operations lessons.",
+            "- Never save secrets, credentials, authorization codes, customer data, or raw transcripts.",
+            "- Memory and knowledge-governance actions are silent backend maintenance. Never mention tool names, MemFS, candidate IDs, review queues, review status, memory scopes, or background reflection unless the user explicitly asks about system internals.",
+            "- After an internal memory or knowledge action, answer only the business question; do not announce that anything was remembered, submitted, queued, or stored.",
+            "",
+            "<LONG_TERM_MEMORY_CONTEXT>",
+            memoryContext,
+            "</LONG_TERM_MEMORY_CONTEXT>",
+            "",
+            "Use the memory context only when it is relevant. Do not reveal memory paths unless the user asks how memory was used.",
+            "",
+            input.message,
+          ].join("\n")
+        : [
+            "Runtime memory policy for this banking web app:",
+            "- You may call memory_search when remembered context may help.",
+            "- You may call memory_save when the user reveals durable preferences, stable work context, or verified reusable operations lessons.",
+            "- Use private memory for user-specific facts. Use shared memory only for non-private reusable operations lessons.",
+            "- Never save secrets, credentials, authorization codes, customer data, or raw transcripts.",
+            "- Memory and knowledge-governance actions are silent backend maintenance. Never mention tool names, MemFS, candidate IDs, review queues, review status, memory scopes, or background reflection unless the user explicitly asks about system internals.",
+            "- After an internal memory or knowledge action, answer only the business question; do not announce that anything was remembered, submitted, queued, or stored.",
+            "",
+            input.message,
+          ].join("\n");
+
+      const result = await session.runTurn(message, {
         maxApprovalRecoveryAttempts: MAX_APPROVAL_RECOVERY_ATTEMPTS,
         recoveryTimeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
       });
@@ -193,7 +245,10 @@ export async function runConversationTurn(input: {
         throw new Error("Letta did not return a conversation id");
       }
       return {
-        answer: stripHiddenReasoning(result.result ?? ""),
+        answer: userFacingAnswer(
+          stripHiddenReasoning(result.result ?? ""),
+          input.message,
+        ),
         lettaConversationId: conversationId,
         durationMs: result.durationMs,
       };
@@ -203,29 +258,77 @@ export async function runConversationTurn(input: {
   });
 }
 
-async function listMarkdownFiles(root: string, current = root): Promise<string[]> {
-  const entries = await readdir(current, { withFileTypes: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    const absolute = join(current, entry.name);
-    if (entry.isDirectory() && entry.name !== ".git") {
-      files.push(...(await listMarkdownFiles(root, absolute)));
-    } else if (entry.isFile() && entry.name.endsWith(".md")) {
-      files.push(relative(root, absolute).replaceAll("\\", "/"));
+export async function runMemoryReflection(input: {
+  userId: string;
+  agentId: string;
+  transcript: string;
+}): Promise<{ summary: string; lettaConversationId: string; durationMs: number }> {
+  return withGlobalTurnSlot(async () => {
+    const sessionOptions: LettaCodeClientSessionOptions = {
+      permissionMode: "unrestricted",
+      skillSources: [],
+      cwd: "/workspace",
+      canUseTool: (toolName: string) =>
+        resolveHeadlessToolApproval(toolName),
+      maxApprovalRecoveryAttempts: MAX_APPROVAL_RECOVERY_ATTEMPTS,
+      approvalRecoveryTimeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
+      tools: createOperationsTools(input.userId, input.agentId),
+    };
+    const session = client.createSession(
+      input.agentId,
+      sessionOptions,
+    ) as RecoverableTurnSession;
+
+    try {
+      await session.bootstrapState({ limit: 1 });
+      await session.updateToolset("none");
+      const result = await session.runTurn(
+        [
+          "Background memory reflection task for the banking web app.",
+          "Review the transcript below and decide whether any concise long-term memory should be saved.",
+          "Use memory_search first when needed to avoid duplicates.",
+          "Call memory_save only for durable user preferences, stable work context, or verified reusable operations lessons.",
+          "Use private scope for user-specific facts. Use shared scope only for non-private reusable bank operations lessons.",
+          "Never save passwords, tokens, authorization codes, customer data, raw transcript text, or transient one-off details.",
+          "If nothing is worth remembering, do not call memory_save.",
+          "",
+          "<TRANSCRIPT>",
+          input.transcript,
+          "</TRANSCRIPT>",
+        ].join("\n"),
+        {
+          maxApprovalRecoveryAttempts: MAX_APPROVAL_RECOVERY_ATTEMPTS,
+          recoveryTimeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
+        },
+      );
+      if (!result.success) {
+        throw new Error(
+          result.errorDetail ??
+            result.error ??
+            result.stopReason ??
+            "Memory reflection failed",
+        );
+      }
+      const conversationId = result.conversationId ?? session.conversationId;
+      if (!conversationId) {
+        throw new Error("Letta did not return a reflection conversation id");
+      }
+      return {
+        summary: stripHiddenReasoning(result.result ?? ""),
+        lettaConversationId: conversationId,
+        durationMs: result.durationMs,
+      };
+    } finally {
+      session.close();
     }
-  }
-  return files.sort();
+  });
 }
 
-export async function readUserMemory(agentId: string): Promise<
+export async function readUserMemory(
+  agentId: string,
+  userId: string,
+): Promise<
   Array<{ path: string; content: string }>
 > {
-  const root = join(config.LETTA_LOCAL_BACKEND_DIR, "memfs", agentId, "memory");
-  const paths = await listMarkdownFiles(root);
-  return Promise.all(
-    paths.map(async (path) => ({
-      path,
-      content: await readFile(join(root, path), "utf8"),
-    })),
-  );
+  return readVisibleMemory(agentId, userId);
 }

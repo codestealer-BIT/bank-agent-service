@@ -7,11 +7,14 @@ machine inventory dashboard, and floating chat widget.
 
 - Local username/password demo login backed by PostgreSQL.
 - Passwords hashed with salted `scrypt`; sessions stored server-side and referenced by an HttpOnly, SameSite cookie.
-- One shared Letta agent and shared MemFS knowledge space for all users.
+- One shared top-level Letta agent with MemFS split into per-user private memory and shared operations memory.
 - Multiple isolated conversations per user.
 - Public demo APIs and read-only agent tools for datacenters and machines.
+- Controlled `memory_search` and `memory_save` tools let the agent learn during normal chat turns without exposing shell or arbitrary file tools.
+- A background memory reflection worker periodically reviews completed turns and writes durable memories when the model judges them useful.
+- A controlled SMTP email tool with a schedule-bound recipient that the model cannot alter.
 - Reusable, privacy-filtered knowledge candidates are queued for later review
-  and Data Sources/Folders ingestion instead of writing MemFS during chat turns.
+  and Data Sources/Folders ingestion.
 - Strict serialization inside one conversation through a Redis distributed lock.
 - Parallel execution across different conversations, with a global concurrency cap (default 32).
 - Persistent local Docker volumes; no Letta Constellation login or cloud MemFS sync.
@@ -38,6 +41,53 @@ Default local demo accounts (unless changed through `.env`):
 | `userb` | 林清禾 | `LettaDemo@2026` |
 
 These map to the existing internal identities `demo-user-a` and `demo-user-b`, so their previous Agent IDs and MemFS repositories remain available.
+
+## Local MemFS learning
+
+Normal chat turns use two memory paths:
+
+- Before each model turn, the backend searches the current user's private MemFS and the shared operations MemFS, then injects relevant snippets into the turn context.
+- During the turn, the model may call `memory_save` when it decides a preference, stable work context, or reusable operations lesson should be remembered.
+
+The background reflection worker is enabled by default. It scans completed turns every `MEMORY_REFLECTION_POLL_MS` milliseconds and asks the same agent to decide whether anything should be written to MemFS. User-specific memories are stored under `users/<user_id>/`; reusable operations lessons go under `shared/`.
+
+Useful knobs:
+
+```dotenv
+MEMORY_REFLECTION_ENABLED=true
+MEMORY_REFLECTION_POLL_MS=300000
+MEMORY_REFLECTION_BATCH_SIZE=12
+```
+
+## QQ SMTP email schedule
+
+The recommended schedule named `每日运维邮件` asks the Agent to query the
+infrastructure tools and then call the controlled `send_email` tool. The user
+enters the recipient in the schedule form; the backend binds it to that schedule.
+The model can set only the subject and plain-text body and cannot change the
+recipient. Sender credentials remain in the backend environment and are never
+exposed to the model.
+
+Enable POP3/IMAP/SMTP in QQ Mail, generate a 16-character authorization code,
+then add the following values to `.env`:
+
+```dotenv
+SMTP_ENABLED=true
+SMTP_HOST=smtp.qq.com
+SMTP_PORT=465
+SMTP_SECURE=true
+SMTP_USER=your-account@qq.com
+SMTP_AUTH_CODE=your-16-character-authorization-code
+SMTP_DEFAULT_TO=optional-fallback-recipient@example.com
+SMTP_FROM_NAME=澄川智能运维助手
+```
+
+Use the QQ authorization code, not the QQ login password. Restart the API after
+changing `.env`:
+
+```powershell
+docker compose up -d --build
+```
 
 ## API example
 

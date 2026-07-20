@@ -83,6 +83,20 @@ CREATE TABLE IF NOT EXISTS turns (
 CREATE INDEX IF NOT EXISTS turns_conversation_created_idx
   ON turns(conversation_id, created_at);
 
+ALTER TABLE turns
+  ADD COLUMN IF NOT EXISTS memory_reflection_status TEXT
+    CHECK (memory_reflection_status IN ('processing', 'completed', 'failed'));
+
+ALTER TABLE turns
+  ADD COLUMN IF NOT EXISTS memory_reflected_at TIMESTAMPTZ;
+
+ALTER TABLE turns
+  ADD COLUMN IF NOT EXISTS memory_reflection_error TEXT;
+
+CREATE INDEX IF NOT EXISTS turns_memory_reflection_idx
+  ON turns(user_id, completed_at)
+  WHERE status = 'completed' AND memory_reflected_at IS NULL;
+
 ALTER TABLE conversations
   ADD COLUMN IF NOT EXISTS agent_id TEXT;
 
@@ -100,6 +114,56 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
 
 CREATE INDEX IF NOT EXISTS knowledge_candidates_status_created_idx
   ON knowledge_candidates(status, created_at);
+
+CREATE TABLE IF NOT EXISTS schedules (
+  id UUID PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES user_accounts(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  prompt TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'custom',
+  icon TEXT NOT NULL DEFAULT 'spark',
+  accent TEXT NOT NULL DEFAULT 'violet',
+  environment_label TEXT NOT NULL DEFAULT 'bank-runtime',
+  conversation_target TEXT NOT NULL DEFAULT 'new'
+    CHECK (conversation_target IN ('new')),
+  schedule_type TEXT NOT NULL
+    CHECK (schedule_type IN ('recurring', 'one_off')),
+  timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+  recurrence_kind TEXT
+    CHECK (recurrence_kind IN ('daily', 'weekdays', 'weekly')),
+  weekday INTEGER CHECK (weekday BETWEEN 0 AND 6),
+  hour INTEGER NOT NULL CHECK (hour BETWEEN 0 AND 23),
+  minute INTEGER NOT NULL CHECK (minute BETWEEN 0 AND 59),
+  scheduled_for TIMESTAMPTZ,
+  recipient_email TEXT,
+  next_run_at TIMESTAMPTZ NOT NULL,
+  last_run_at TIMESTAMPTZ,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE schedules
+  ADD COLUMN IF NOT EXISTS recipient_email TEXT;
+
+CREATE INDEX IF NOT EXISTS schedules_user_next_run_idx
+  ON schedules(user_id, enabled, next_run_at);
+
+CREATE TABLE IF NOT EXISTS schedule_runs (
+  id UUID PRIMARY KEY,
+  schedule_id UUID NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES user_accounts(id) ON DELETE CASCADE,
+  status TEXT NOT NULL
+    CHECK (status IN ('processing', 'completed', 'failed')),
+  conversation_id UUID,
+  error TEXT,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS schedule_runs_schedule_started_idx
+  ON schedule_runs(schedule_id, started_at DESC);
 `;
 
 export async function migrate(): Promise<void> {
