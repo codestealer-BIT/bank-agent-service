@@ -85,7 +85,6 @@
   let scheduleFilter = "all";
   let suppressMessageAutoScroll = false;
   let pendingAttachments = [];
-  let attachInputMode = "file";
 
   const setButtonBusy = (button, busy, label = "") => {
     if (!button) return;
@@ -124,20 +123,52 @@
     return body;
   };
 
+  const wait = (milliseconds) =>
+    new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+
   const streamRequest = async (path, payload, onEvent) => {
-    const response = await fetch(path, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
+    const maximumAttempts = 4;
+    let response = null;
+
+    for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+      try {
+        response = await fetch(path, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        });
+      } catch (error) {
+        if (attempt === maximumAttempts) throw error;
+        await wait(700 * 2 ** (attempt - 1));
+        continue;
+      }
+
+      if (response.ok) break;
+
+      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      const isFrpFallback = response.status === 404 && contentType.includes("text/html");
+      const isTemporaryGatewayFailure = [502, 503, 504].includes(response.status);
+      const shouldRetry = isFrpFallback || isTemporaryGatewayFailure;
+
+      if (shouldRetry && attempt < maximumAttempts) {
+        await response.text().catch(() => "");
+        await wait(700 * 2 ** (attempt - 1));
+        continue;
+      }
+
+      const body = contentType.includes("json")
+        ? await response.json().catch(() => ({}))
+        : {};
       throw Object.assign(new Error(body?.error ?? `HTTP ${response.status}`), {
         status: response.status,
       });
+    }
+
+    if (!response?.ok) {
+      throw new Error("连接智能助手失败，请稍后重试");
     }
     if (!response.body) {
       const body = await response.json();
@@ -171,6 +202,81 @@
     }
 
     return finalEvent;
+  };
+
+  const gatewayRequest = async (path, options = {}, maximumAttempts = 10) => {
+    let lastError = null;
+    for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+      try {
+        const response = await fetch(path, {
+          credentials: "same-origin",
+          ...options,
+          headers: {
+            ...(options.body ? { "Content-Type": "application/json" } : {}),
+            ...(options.headers ?? {}),
+          },
+        });
+        const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+        const isFrpFallback = response.status === 404 && contentType.includes("text/html");
+        const isTemporaryGatewayFailure = [502, 503, 504].includes(response.status);
+        if ((isFrpFallback || isTemporaryGatewayFailure) && attempt < maximumAttempts) {
+          await response.text().catch(() => "");
+          await wait(Math.min(2_000, 350 * attempt));
+          continue;
+        }
+
+        const body = contentType.includes("json")
+          ? await response.json().catch(() => ({}))
+          : {};
+        if (!response.ok) {
+          throw Object.assign(new Error(body?.error ?? `HTTP ${response.status}`), {
+            status: response.status,
+          });
+        }
+        return body;
+      } catch (error) {
+        lastError = error;
+        if (error?.status || attempt === maximumAttempts) throw error;
+        await wait(Math.min(2_000, 350 * attempt));
+      }
+    }
+    throw lastError ?? new Error("连接智能助手失败，请稍后重试");
+  };
+
+  const runMessageJobRequest = async (path, payload, onEvent) => {
+    const accepted = await gatewayRequest(
+      path,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      12,
+    );
+    const jobId = accepted.job_id;
+    if (!jobId) throw new Error("服务未返回任务编号");
+
+    let cursor = 0;
+    let finalEvent = null;
+    const deadline = Date.now() + 15 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const snapshot = await gatewayRequest(
+        `/v1/message-jobs/${encodeURIComponent(jobId)}?after=${cursor}`,
+        {},
+        12,
+      );
+      for (const event of snapshot.events ?? []) {
+        cursor += 1;
+        if (event.type === "final") finalEvent = event;
+        await onEvent(event);
+      }
+      if (snapshot.status === "completed") return finalEvent;
+      if (snapshot.status === "failed") {
+        throw new Error(snapshot.error || "智能助手处理失败");
+      }
+      cursor = Math.max(cursor, Number(snapshot.next_cursor) || cursor);
+      await wait(500);
+    }
+    throw new Error("智能助手处理超时，请稍后刷新会话查看结果");
   };
 
   const avatarClass = (user) =>
@@ -303,17 +409,16 @@
       reader.readAsDataURL(file);
     });
 
-  const readAsText = (file) =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.addEventListener("load", () => resolve(String(reader.result)));
-      reader.addEventListener("error", () => reject(reader.error));
-      reader.readAsText(file);
-    });
+  const supportedDocumentPattern =
+    /\.(pdf|docx|pptx|xlsx|odt|ods|odp|rtf|epub|txt|md|log|csv|tsv|json|jsonl|yaml|yml|xml|html?|sql|py|js|mjs|cjs|jsx|ts|tsx|java|c|h|cpp|hpp|go|rs|sh|ps1|ini|conf|properties)$/i;
 
-  const isTextLikeFile = (file) =>
-    file.type.startsWith("text/") ||
-    /\.(txt|md|log|json|csv|yaml|yml)$/i.test(file.name);
+  const isSupportedDocument = (file) => supportedDocumentPattern.test(file.name);
+
+  const attachmentIcon = (attachment) => {
+    if (attachment.kind === "image") return "IMG";
+    const extension = attachment.name.split(".").pop()?.toUpperCase() ?? "FILE";
+    return extension.slice(0, 5);
+  };
 
   const renderAttachmentPreview = () => {
     attachmentPreview.innerHTML = "";
@@ -329,7 +434,7 @@
       } else {
         const icon = document.createElement("span");
         icon.className = "attachment-file-icon";
-        icon.textContent = attachment.kind === "text_file" ? "TXT" : "FILE";
+        icon.textContent = attachmentIcon(attachment);
         item.append(icon);
       }
       const meta = document.createElement("span");
@@ -372,6 +477,18 @@
         break;
       }
       try {
+        if (!file.size) {
+          errors.push(`${file.name} 是空文件，无法发送。`);
+          continue;
+        }
+        const totalBytes = pendingAttachments.reduce(
+          (sum, attachment) => sum + (attachment.size || 0),
+          0,
+        );
+        if (totalBytes + file.size > 20 * 1024 * 1024) {
+          errors.push("附件总大小不能超过 20MB。");
+          continue;
+        }
         if (file.type.startsWith("image/")) {
           if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type)) {
             errors.push(`${file.name} 不是支持的图片格式。`);
@@ -391,25 +508,24 @@
             size: file.size,
             previewUrl: dataUrl,
           });
-        } else if (isTextLikeFile(file)) {
-          if (file.size > 512 * 1024) {
-            errors.push(`${file.name} 超过 512KB，无法作为文本读取。`);
+        } else if (isSupportedDocument(file)) {
+          if (file.size > 20 * 1024 * 1024) {
+            errors.push(`${file.name} 超过 20MB，无法解析。`);
             continue;
           }
+          const dataUrl = await readAsDataUrl(file);
+          const [, data = ""] = dataUrl.split(",");
           pendingAttachments.push({
-            kind: "text_file",
+            kind: "document",
             name: file.name,
-            media_type: file.type || "text/plain",
-            text: await readAsText(file),
+            media_type: file.type || "application/octet-stream",
+            data,
             size: file.size,
           });
         } else {
-          pendingAttachments.push({
-            kind: "file",
-            name: file.name,
-            media_type: file.type || "application/octet-stream",
-            size: file.size,
-          });
+          errors.push(
+            `${file.name} 暂不支持，请转换为 PDF、DOCX、PPTX、XLSX、ODT、RTF、EPUB 或纯文本格式。`,
+          );
         }
       } catch (error) {
         errors.push(`${file.name} 读取失败：${error.message || "未知错误"}`);
@@ -778,8 +894,8 @@
     updateComposerState();
     try {
       let streamCompleted = false;
-      await streamRequest(
-        `/v1/conversations/${targetConversationId}/messages/stream`,
+      await runMessageJobRequest(
+        `/v1/conversations/${targetConversationId}/message-jobs`,
         {
           message: messageText,
           attachments: serializeAttachments(attachments),
@@ -1282,11 +1398,6 @@
 
   attachmentMenu.querySelectorAll("[data-attach-kind]").forEach((button) => {
     button.addEventListener("click", () => {
-      attachInputMode = button.dataset.attachKind;
-      attachmentInput.accept =
-        attachInputMode === "image"
-          ? "image/png,image/jpeg,image/gif,image/webp"
-          : "image/png,image/jpeg,image/gif,image/webp,text/*,.txt,.md,.log,.json,.csv";
       attachmentMenu.hidden = true;
       attachmentInput.click();
     });

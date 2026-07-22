@@ -18,7 +18,7 @@ import { createOperationsTools } from "./agent-tools.js";
 import { pool } from "./database.js";
 import {
   formatMemoryContext,
-  readVisibleMemory,
+  readSharedMemory,
   searchMemory,
 } from "./memory-service.js";
 import {
@@ -31,6 +31,8 @@ import {
   MAX_APPROVAL_RECOVERY_ATTEMPTS,
   resolveHeadlessToolApproval,
 } from "./letta-session-policy.js";
+import { extractPdfText } from "./pdf-service.js";
+import { extractDocumentText } from "./document-service.js";
 import { userFacingAnswer } from "./response-policy.js";
 
 const client = new LettaAgentClient({
@@ -95,12 +97,12 @@ async function createSharedOperationsAgent(): Promise<string> {
     persona: [
       "You are a careful bank infrastructure operations assistant used by multiple employees.",
       "Each conversation is private conversation context even though all conversations share one top-level agent.",
-      "Long-term memory is stored in MemFS. User-specific memory lives under the current authenticated user's private memory area; shared operations lessons live under shared memory.",
+      "Long-term memory is stored only in a bank-wide shared MemFS. There is no user-private long-term memory; conversation transcripts remain isolated by authenticated user and conversation.",
       "Use the infrastructure query tools for machine counts, datacenter information, machine status, and alerts. Never invent operational data when a tool can answer.",
       "Do not expose one conversation's user-specific content in another conversation.",
-      "Use memory_search when a question may relate to remembered preferences, prior work context, or reusable operations knowledge.",
-      "Use memory_save during normal chat when the user reveals a durable preference, identity fact, work context, or verified reusable lesson worth remembering. Keep memories concise and generalized.",
-      "Use private memory for user-specific facts and preferences. Use shared memory only for reusable bank operations lessons that contain no private data.",
+      "Use memory_search when a question may relate to remembered organization-wide facts, plans, policies, procedures, or reusable operations knowledge.",
+      "Use memory_save during normal chat when the conversation establishes a durable organization-wide fact, confirmed plan, policy, procedure, or verified reusable operations lesson. Keep memories concise and generalized.",
+      "Do not save personal preferences, user identity facts, private discussions, customer data, or other user-specific information. All saved long-term memory is visible to every authenticated account.",
       "The only approved outbound action is send_email. Call it only when the user explicitly requests an email or a schedule explicitly requires an emailed report, and call it at most once per turn.",
       "Never put passwords, authorization codes, keys, customer data, or other sensitive information in an email.",
       "Only call submit_shared_knowledge_candidate when a conversation produced a reusable, verified problem-solving lesson that contains no personal information, credentials, secrets, customer data, or raw conversation text.",
@@ -166,19 +168,19 @@ async function buildRuntimeMessage(input: {
   message: string;
   attachments?: TurnAttachment[];
 }): Promise<SendMessage> {
+  const attachments = await prepareAttachments(input.attachments ?? []);
   const memoryContext = formatMemoryContext(
     await searchMemory({
       agentId: input.agentId,
-      userId: input.userId,
       query: input.message,
       limit: 5,
     }),
   );
   const policy = [
     "Runtime memory policy for this banking web app:",
-    "- You may call memory_search when remembered context may help.",
-    "- You may call memory_save when the user reveals durable preferences, stable work context, or verified reusable operations lessons.",
-    "- Use private memory for user-specific facts. Use shared memory only for non-private reusable operations lessons.",
+    "- You may call memory_search when bank-wide remembered context may help.",
+    "- You may call memory_save for durable organization-wide facts, confirmed plans, policies, procedures, or verified reusable operations lessons.",
+    "- There is no private long-term memory. Never save personal preferences, identity facts, private discussions, or other user-specific content; all saved memory is shared across authenticated accounts.",
     "- Never save secrets, credentials, authorization codes, customer data, or raw transcripts.",
     "- Memory and knowledge-governance actions are silent backend maintenance. Never mention tool names, MemFS, candidate IDs, review queues, review status, memory scopes, or background reflection unless the user explicitly asks about system internals.",
     "- After an internal memory or knowledge action, answer only the business question; do not announce that anything was remembered, submitted, queued, or stored.",
@@ -197,7 +199,7 @@ async function buildRuntimeMessage(input: {
       ].join("\n")
     : [...policy, "", input.message].join("\n");
 
-  return buildTurnMessage(textMessage, input.attachments ?? []);
+  return buildTurnMessage(textMessage, attachments);
 }
 
 export async function runConversationTurn(input: {
@@ -404,6 +406,20 @@ export type TurnAttachment =
       size?: number;
     }
   | {
+      kind: "pdf";
+      name: string;
+      mediaType: "application/pdf";
+      data: string;
+      size?: number;
+    }
+  | {
+      kind: "document";
+      name: string;
+      mediaType: string;
+      data: string;
+      size?: number;
+    }
+  | {
       kind: "text_file";
       name: string;
       mediaType: string;
@@ -417,13 +433,69 @@ export type TurnAttachment =
       size?: number;
     };
 
+async function prepareAttachments(
+  attachments: TurnAttachment[],
+): Promise<TurnAttachment[]> {
+  return Promise.all(
+    attachments.map(async (attachment): Promise<TurnAttachment> => {
+      if (attachment.kind === "document") {
+        const extracted = await extractDocumentText({
+          name: attachment.name,
+          mediaType: attachment.mediaType,
+          data: attachment.data,
+        });
+        const extractionNote = !extracted.hasExtractableText
+          ? "No readable text was found. The file may contain only scanned pages or embedded images."
+          : extracted.truncated
+            ? "Only the first 60,000 extracted characters are included because the document is long."
+            : "The complete extractable document text is included below.";
+        return {
+          kind: "text_file",
+          name: attachment.name,
+          mediaType: attachment.mediaType,
+          size: attachment.size,
+          text: [
+            `Document format: ${extracted.format}`,
+            extracted.details ?? "",
+            extractionNote,
+            "",
+            extracted.text,
+          ]
+            .filter((line, index) => line || index >= 3)
+            .join("\n"),
+        };
+      }
+      if (attachment.kind !== "pdf") return attachment;
+
+      const extracted = await extractPdfText(attachment.data);
+      const extractionNote = !extracted.hasExtractableText
+        ? "This PDF contains no extractable text. It may be a scanned document and requires OCR before its contents can be analyzed."
+        : extracted.truncated
+          ? "Only the first 60,000 extracted characters are included because the document is long."
+          : "The complete extractable PDF text is included below.";
+      return {
+        kind: "text_file",
+        name: attachment.name,
+        mediaType: attachment.mediaType,
+        size: attachment.size,
+        text: [
+          `PDF pages: ${extracted.pages}`,
+          extractionNote,
+          "",
+          extracted.text,
+        ].join("\n"),
+      };
+    }),
+  );
+}
+
 function renderAttachmentContext(attachments: TurnAttachment[]): string {
   if (!attachments.length) return "";
   const lines = attachments.map((attachment, index) => {
     const prefix = `Attachment ${index + 1}: ${attachment.name} (${attachment.mediaType}`;
     const size = attachment.size == null ? "" : `, ${attachment.size} bytes`;
     if (attachment.kind === "text_file") {
-      return `${prefix}${size})\n${attachment.text.slice(0, 20_000)}`;
+      return `${prefix}${size})\n${attachment.text.slice(0, 60_000)}`;
     }
     if (attachment.kind === "image") {
       return [
@@ -491,8 +563,8 @@ export async function runMemoryReflection(input: {
           "Background memory reflection task for the banking web app.",
           "Review the transcript below and decide whether any concise long-term memory should be saved.",
           "Use memory_search first when needed to avoid duplicates.",
-          "Call memory_save only for durable user preferences, stable work context, or verified reusable operations lessons.",
-          "Use private scope for user-specific facts. Use shared scope only for non-private reusable bank operations lessons.",
+          "Call memory_save only for durable organization-wide facts, confirmed plans, policies, procedures, or verified reusable operations lessons.",
+          "There is no private long-term memory. Do not save personal preferences, identity facts, private discussions, or other user-specific content because every saved memory is shared across authenticated accounts.",
           "Never save passwords, tokens, authorization codes, customer data, raw transcript text, or transient one-off details.",
           "If nothing is worth remembering, do not call memory_save.",
           "",
@@ -530,9 +602,8 @@ export async function runMemoryReflection(input: {
 
 export async function readUserMemory(
   agentId: string,
-  userId: string,
 ): Promise<
   Array<{ path: string; content: string }>
 > {
-  return readVisibleMemory(agentId, userId);
+  return readSharedMemory(agentId);
 }

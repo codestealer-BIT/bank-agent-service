@@ -51,7 +51,6 @@ const memorySearchInput = z.object({
 });
 
 const memorySaveInput = z.object({
-  scope: z.enum(["private", "shared"]).default("private"),
   content: z.string().trim().min(3).max(2_000),
   category: z.string().trim().min(1).max(80).optional(),
   tags: z.array(z.string()).max(8).optional(),
@@ -78,7 +77,7 @@ export function createOperationsTools(
       label: "Memory search",
       name: "memory_search",
       description:
-        "Search the current user's private MemFS plus shared bank operations memory. Use this before answering when the user's question may relate to durable preferences, prior work, or remembered operations knowledge.",
+        "Search the shared MemFS used by all authenticated bank employees. Use this before answering when the question may relate to remembered organization-wide facts, plans, policies, procedures, or reusable operations knowledge.",
       parameters: {
         type: "object",
         properties: {
@@ -93,7 +92,6 @@ export function createOperationsTools(
         return jsonResult(
           await searchMemory({
             agentId,
-            userId,
             query: input.query,
             limit: input.limit,
           }),
@@ -104,11 +102,10 @@ export function createOperationsTools(
       label: "Memory save",
       name: "memory_save",
       description:
-        "Write a concise long-term memory to MemFS. Use private for user-specific facts, preferences, and work context. Use shared only for reusable bank operations lessons that contain no private or sensitive data. Never store passwords, keys, tokens, authorization codes, customer data, or raw conversation transcripts.",
+        "Write a concise item to the bank-wide shared MemFS. Save durable organization-wide facts, confirmed plans, policies, procedures, and verified reusable operations lessons. Do not save personal preferences, user identity facts, private discussions, passwords, keys, tokens, authorization codes, customer data, or raw conversation transcripts.",
       parameters: {
         type: "object",
         properties: {
-          scope: { type: "string", enum: ["private", "shared"] },
           content: { type: "string" },
           category: { type: "string" },
           tags: { type: "array", items: { type: "string" } },
@@ -121,8 +118,6 @@ export function createOperationsTools(
         return jsonResult(
           await saveMemory({
             agentId,
-            userId,
-            scope: input.scope,
             content: input.content,
             category: input.category,
             tags: input.tags,

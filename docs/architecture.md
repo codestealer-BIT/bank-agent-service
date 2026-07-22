@@ -21,12 +21,14 @@ bank-letta-agent-service (one public API contract)
 
 ## Isolation model
 
-- One service endpoint and one assistant template do not mean one shared memory identity.
+- One service endpoint and one assistant template use one bank-wide shared long-term memory identity.
 - All authenticated users map to one long-lived shared Letta `agent_id`.
 - A user can have many conversations and each Letta conversation remains separate.
-- Normal chat turns cannot write MemFS directly. The agent may submit a
-  privacy-filtered reusable knowledge candidate into PostgreSQL for later
-  review and ingestion into Letta Data Sources/Folders.
+- The controlled `memory_save` tool writes only organization-wide facts,
+  confirmed plans, policies, procedures, and verified reusable operations
+  lessons to shared MemFS. It does not provide a private-memory scope.
+- Personal preferences, identity facts, private discussions, credentials,
+  customer data, and raw transcripts are excluded from long-term memory.
 - The browser cannot choose its own `user_id`; an HttpOnly session maps the login to an immutable internal identity.
 - Every database lookup includes both `conversation_id` and authenticated `user_id`; guessing another UUID is insufficient.
 - `lock:conversation:<id>` serializes turns in one conversation across all API replicas.

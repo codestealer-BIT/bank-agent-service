@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { config } from "./config.js";
 import { containsSensitiveKnowledge, normalizeTags } from "./knowledge-policy.js";
 
-export type MemoryScope = "private" | "shared";
+export type MemoryScope = "shared";
 
 export type MemorySnippet = {
   path: string;
@@ -11,10 +11,6 @@ export type MemorySnippet = {
   score: number;
   scope: MemoryScope;
 };
-
-function safeSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
-}
 
 export function memoryRoot(agentId: string): string {
   return join(config.LETTA_LOCAL_BACKEND_DIR, "memfs", agentId, "memory");
@@ -31,12 +27,9 @@ function ensureInside(root: string, target: string): void {
   }
 }
 
-function memoryFile(agentId: string, userId: string, scope: MemoryScope): string {
+function memoryFile(agentId: string): string {
   const root = memoryRoot(agentId);
-  const path =
-    scope === "shared"
-      ? join(root, "shared", "operations.md")
-      : join(root, "users", safeSegment(userId), "profile.md");
+  const path = join(root, "shared", "knowledge.md");
   ensureInside(root, path);
   return path;
 }
@@ -72,11 +65,6 @@ async function listMarkdownFiles(root: string, current = root): Promise<string[]
   return files.sort();
 }
 
-function visibleMemoryPaths(path: string, userId: string): boolean {
-  const safeUser = safeSegment(userId);
-  return path.startsWith(`users/${safeUser}/`) || path.startsWith("shared/");
-}
-
 function tokenize(value: string): string[] {
   const lower = value.toLowerCase();
   const asciiWords = lower.match(/[a-z0-9_@.-]{2,}/g) ?? [];
@@ -101,8 +89,6 @@ function scoreMemory(query: string, content: string): number {
 
 export async function saveMemory(input: {
   agentId: string;
-  userId: string;
-  scope: MemoryScope;
   content: string;
   category?: string;
   tags?: string[];
@@ -113,12 +99,10 @@ export async function saveMemory(input: {
     return { saved: false, reason: "Sensitive content is not stored in memory." };
   }
 
-  const path = memoryFile(input.agentId, input.userId, input.scope);
+  const path = memoryFile(input.agentId);
   await ensureMarkdownFile(
     path,
-    input.scope === "shared"
-      ? "Reusable bank operations lessons shared across users."
-      : "Private long-term memory for this authenticated user.",
+    "Organization-wide facts, plans, policies, and reusable bank operations knowledge shared across authenticated users.",
   );
 
   const existing = await readFile(path, "utf8");
@@ -143,13 +127,12 @@ export async function saveMemory(input: {
 
 export async function searchMemory(input: {
   agentId: string;
-  userId: string;
   query: string;
   limit?: number;
 }): Promise<MemorySnippet[]> {
   const root = memoryRoot(input.agentId);
   const paths = (await listMarkdownFiles(root)).filter((path) =>
-    visibleMemoryPaths(path, input.userId),
+    path.startsWith("shared/"),
   );
   const snippets: MemorySnippet[] = [];
   for (const path of paths) {
@@ -162,7 +145,7 @@ export async function searchMemory(input: {
       path,
       content: content.slice(0, 4_000),
       score,
-      scope: path.startsWith("shared/") ? "shared" : "private",
+      scope: "shared",
     });
   }
   return snippets
@@ -170,13 +153,12 @@ export async function searchMemory(input: {
     .slice(0, input.limit ?? 5);
 }
 
-export async function readVisibleMemory(
+export async function readSharedMemory(
   agentId: string,
-  userId: string,
 ): Promise<Array<{ path: string; content: string }>> {
   const root = memoryRoot(agentId);
   const paths = (await listMarkdownFiles(root)).filter((path) =>
-    visibleMemoryPaths(path, userId),
+    path.startsWith("shared/"),
   );
   return Promise.all(
     paths.map(async (path) => ({

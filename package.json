@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
     "check": "tsc -p tsconfig.json --noEmit",
+    "smoke:document": "node scripts/smoke-document-upload.mjs",
     "patch:letta-code-vision": "node scripts/patch-letta-code-vision.mjs",
     "test": "node --import tsx --test test/**/*.test.ts"
   },
@@ -20,7 +21,9 @@
     "@letta-ai/letta-agent-sdk": "0.2.6",
     "fastify": "^5.6.2",
     "ioredis": "^5.8.2",
+    "jszip": "^3.10.1",
     "nodemailer": "^9.0.3",
+    "pdf-parse": "^1.1.1",
     "pg": "^8.16.3",
     "zod": "^4.1.12"
   },

@@ -7,7 +7,7 @@ machine inventory dashboard, and floating chat widget.
 
 - Local username/password demo login backed by PostgreSQL.
 - Passwords hashed with salted `scrypt`; sessions stored server-side and referenced by an HttpOnly, SameSite cookie.
-- One shared top-level Letta agent with MemFS split into per-user private memory and shared operations memory.
+- One shared top-level Letta agent with one bank-wide shared MemFS knowledge pool.
 - Multiple isolated conversations per user.
 - Public demo APIs and read-only agent tools for datacenters and machines.
 - Controlled `memory_search` and `memory_save` tools let the agent learn during normal chat turns without exposing shell or arbitrary file tools.
@@ -44,12 +44,12 @@ These map to the existing internal identities `demo-user-a` and `demo-user-b`, s
 
 ## Local MemFS learning
 
-Normal chat turns use two memory paths:
+Normal chat turns use one shared long-term memory path:
 
-- Before each model turn, the backend searches the current user's private MemFS and the shared operations MemFS, then injects relevant snippets into the turn context.
-- During the turn, the model may call `memory_save` when it decides a preference, stable work context, or reusable operations lesson should be remembered.
+- Before each model turn, the backend searches shared MemFS and injects relevant organization-wide facts, plans, policies, procedures, and operations knowledge into the turn context.
+- During the turn, the model may call `memory_save` when it identifies a durable bank-wide fact, confirmed plan, policy, procedure, or verified reusable operations lesson.
 
-The background reflection worker is enabled by default. It scans completed turns every `MEMORY_REFLECTION_POLL_MS` milliseconds and asks the same agent to decide whether anything should be written to MemFS. User-specific memories are stored under `users/<user_id>/`; reusable operations lessons go under `shared/`.
+The background reflection worker is enabled by default. It scans completed turns every `MEMORY_REFLECTION_POLL_MS` milliseconds and asks the same agent to decide whether anything should be written to shared MemFS. Personal preferences, identity facts, private discussions, customer data, credentials, and raw transcripts are not stored as long-term memory. Conversation history remains isolated by authenticated user and conversation.
 
 Useful knobs:
 
@@ -116,7 +116,7 @@ Invoke-RestMethod `
   -Body '{"request_id":"test-001","message":"请记住我偏好简洁回答"}'
 ```
 
-Inspect only the logged-in user's memory:
+Inspect the shared long-term memory visible to authenticated users:
 
 ```powershell
 Invoke-RestMethod -Uri http://localhost:8080/v1/memory -WebSession $bankSession
