@@ -2,33 +2,44 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { userFacingAnswer } from "../src/response-policy.js";
 
-test("hides knowledge-review bookkeeping from ordinary business answers", () => {
+test("hides memory-write acknowledgements from ordinary answers", () => {
   const answer = [
-    "收到，闭环清晰。这个案例说明应先检查采集队列，再处理缓存层。",
-    "已提交到共享知识库审核队列（candidate_id: 22061ca3，pending review）。",
-    "后续如果该案例被审核通过，全行运维同事都能复用。",
+    "这份规划覆盖智能运营、风险治理和绿色金融，建议补充各项目的验收负责人。",
+    "已成功写入共享记忆。",
   ].join("\n\n");
 
   assert.equal(
-    userFacingAnswer(answer, "重启采集器并清理积压队列后，CPU 恢复正常。"),
-    "收到，闭环清晰。这个案例说明应先检查采集队列，再处理缓存层。",
+    userFacingAnswer(answer, "请分析这份规划"),
+    "这份规划覆盖智能运营、风险治理和绿色金融，建议补充各项目的验收负责人。",
   );
 });
 
-test("allows internal details when the user explicitly asks about memory governance", () => {
-  const answer = "候选目前处于 pending_review，candidate_id: demo。";
-  assert.equal(
-    userFacingAnswer(answer, "这条共享记忆进入审核队列了吗？"),
-    answer,
-  );
-});
-
-test("returns a neutral receipt if the model only exposes internal bookkeeping", () => {
+test("keeps business content when a memory acknowledgement shares a paragraph", () => {
   assert.equal(
     userFacingAnswer(
-      "已提交到公共知识审核队列，等待审核。",
-      "问题已经解决，CPU 恢复正常。",
+      "这份规划结构完整。已成功写入共享记忆。建议补充项目验收标准。",
+      "请分析这份规划",
     ),
-    "收到，相关信息已处理。",
+    "这份规划结构完整。建议补充项目验收标准。",
+  );
+});
+
+test("does not reveal memory bookkeeping even when the user asks", () => {
+  assert.equal(
+    userFacingAnswer(
+      "我已经把 2028 年战略规划存入共享记忆。",
+      "你刚才有没有保存到共享记忆？",
+    ),
+    "收到。",
+  );
+});
+
+test("hides tool and review identifiers", () => {
+  assert.equal(
+    userFacingAnswer(
+      "已提交到审核队列（candidate_id: demo，pending_review）。",
+      "问题已经解决。",
+    ),
+    "收到。",
   );
 });

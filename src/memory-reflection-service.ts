@@ -5,6 +5,7 @@ import {
   getOrCreateUserAgent,
   runMemoryReflection,
 } from "./agent-service.js";
+import { renderAttachmentContextForReflection } from "./attachment-context.js";
 
 type ReflectionTurn = {
   id: string;
@@ -12,6 +13,7 @@ type ReflectionTurn = {
   user_id: string;
   user_message: string;
   assistant_message: string | null;
+  attachment_context: unknown;
   created_at: Date;
 };
 
@@ -20,14 +22,20 @@ let reflectionRunning = false;
 
 function renderTranscript(turns: ReflectionTurn[]): string {
   return turns
-    .map((turn, index) =>
-      [
+    .map((turn, index) => {
+      const attachmentContext = renderAttachmentContextForReflection(
+        turn.attachment_context,
+      );
+      return [
         `Turn ${index + 1}`,
         `Conversation: ${turn.conversation_id}`,
         `User: ${turn.user_message}`,
+        attachmentContext,
         `Assistant: ${turn.assistant_message ?? ""}`,
-      ].join("\n"),
-    )
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
     .join("\n\n");
 }
 
@@ -55,7 +63,8 @@ async function pollMemoryReflection(): Promise<void> {
       "memory-reflection-worker",
       async () => {
         const result = await pool.query<ReflectionTurn>(
-          `SELECT id, conversation_id, user_id, user_message, assistant_message, created_at
+          `SELECT id, conversation_id, user_id, user_message, assistant_message,
+                  attachment_context, created_at
            FROM turns
            WHERE status = 'completed'
              AND assistant_message IS NOT NULL

@@ -10,11 +10,12 @@ Bank API gateway / WAF
         v
 bank-letta-agent-service (one public API contract)
   |-- authentication adapter (demo: server-side sessions; production: bank SSO/OIDC)
-  |-- PostgreSQL users + conversations + audit + knowledge candidates
+  |-- PostgreSQL users + conversations + audit + pgvector memory index
   |-- Redis conversation locks + global model semaphore
   |-- Letta Agent SDK, backend=local
   |     `-- SDK-managed Letta Code app-server processes
   |-- one shared /data/local-backend/memfs/<agent-id>/memory Git repo
+  |-- local BGE-M3 embedding service (Infinity, CPU INT8)
   |-- public demo infrastructure API + read-only agent tools
   `-- OpenAI-compatible calls to the approved LiteLLM gateway
 ```
@@ -38,14 +39,17 @@ bank-letta-agent-service (one public API contract)
 ## Important concurrency boundary
 
 Letta's SDK notes that concurrent sessions sharing one agent MemFS can contend
-on Git state. This prototype keeps conversation turns parallel by denying
-direct MemFS writes during normal chat. Shared knowledge is submitted to a
-separate candidate queue, which can later be reviewed and ingested serially.
+on Git state. Conversation turns are serialized per conversation, while
+controlled shared-memory writes go through the application memory service.
+Different conversations can still run in parallel; production replicas should
+add a distributed write lock around shared Markdown updates.
 
 ## Data location
 
 - MemFS and local Letta state: Docker volume `letta_state`.
-- Ownership, conversation metadata, and audit turns: `postgres_data`.
+- Ownership, conversation metadata, audit turns, and structured attachment extraction results: `postgres_data`.
+- Rebuildable BGE-M3 memory vectors: `memory_chunks` in `postgres_data`.
+- Downloaded BGE-M3 model cache: `bge_model_cache`.
 - Locks and concurrency leases: `redis_data`.
 - No Constellation login or Letta Cloud API key is used.
 - Prompts still leave the container for the configured LiteLLM gateway. For a strict bank boundary, that gateway and its model workers must also be deployed in the bank network and must disable prompt logging.

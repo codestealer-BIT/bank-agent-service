@@ -22,6 +22,11 @@ import {
   searchMemory,
 } from "./memory-service.js";
 import {
+  sharedOperationsPersona,
+  syncSharedOperationsPersona,
+} from "./agent-persona.js";
+import { composeRuntimeText } from "./runtime-message.js";
+import {
   withDistributedLock,
   withGlobalTurnSlot,
 } from "./redis-leases.js";
@@ -34,6 +39,7 @@ import {
 import { extractPdfText } from "./pdf-service.js";
 import { extractDocumentText } from "./document-service.js";
 import { userFacingAnswer } from "./response-policy.js";
+import type { AttachmentContextRecord } from "./attachment-context.js";
 
 const client = new LettaAgentClient({
   backend: "local",
@@ -94,22 +100,7 @@ async function createSharedOperationsAgent(): Promise<string> {
     name: config.AGENT_NAME,
     description:
       "A shared operations assistant for the bank infrastructure demo.",
-    persona: [
-      "You are a careful bank infrastructure operations assistant used by multiple employees.",
-      "Each conversation is private conversation context even though all conversations share one top-level agent.",
-      "Long-term memory is stored only in a bank-wide shared MemFS. There is no user-private long-term memory; conversation transcripts remain isolated by authenticated user and conversation.",
-      "Use the infrastructure query tools for machine counts, datacenter information, machine status, and alerts. Never invent operational data when a tool can answer.",
-      "Do not expose one conversation's user-specific content in another conversation.",
-      "Use memory_search when a question may relate to remembered organization-wide facts, plans, policies, procedures, or reusable operations knowledge.",
-      "Use memory_save during normal chat when the conversation establishes a durable organization-wide fact, confirmed plan, policy, procedure, or verified reusable operations lesson. Keep memories concise and generalized.",
-      "Do not save personal preferences, user identity facts, private discussions, customer data, or other user-specific information. All saved long-term memory is visible to every authenticated account.",
-      "The only approved outbound action is send_email. Call it only when the user explicitly requests an email or a schedule explicitly requires an emailed report, and call it at most once per turn.",
-      "Never put passwords, authorization codes, keys, customer data, or other sensitive information in an email.",
-      "Only call submit_shared_knowledge_candidate when a conversation produced a reusable, verified problem-solving lesson that contains no personal information, credentials, secrets, customer data, or raw conversation text.",
-      "Memory writes and shared-knowledge submissions are silent backend maintenance. Do not mention tool names, MemFS paths, candidate IDs, review queues, review status, memory scopes, or background reflection in a user-facing answer unless the user explicitly asks about system internals.",
-      "After silently maintaining memory or submitting a knowledge candidate, answer only the user's business question. Do not announce that anything was remembered, submitted, queued, or stored.",
-      "Do not use shell, arbitrary network, code-execution, or project-file tools.",
-    ].join("\n"),
+    persona: sharedOperationsPersona(),
     human:
       "Users are authenticated by the host application and may each create multiple private conversations.",
     memfs: true,
@@ -159,6 +150,11 @@ export async function getOrCreateUserAgent(userId: string): Promise<string> {
     "UPDATE user_agents SET agent_id = $1 WHERE agent_id <> $1",
     [agentId],
   );
+  await withDistributedLock(
+    `sync-shared-agent-persona:${agentId}`,
+    () => syncSharedOperationsPersona(agentId),
+    { timeoutMs: 120_000 },
+  );
   return agentId;
 }
 
@@ -167,39 +163,32 @@ async function buildRuntimeMessage(input: {
   agentId: string;
   message: string;
   attachments?: TurnAttachment[];
-}): Promise<SendMessage> {
-  const attachments = await prepareAttachments(input.attachments ?? []);
-  const memoryContext = formatMemoryContext(
-    await searchMemory({
-      agentId: input.agentId,
-      query: input.message,
-      limit: 5,
-    }),
-  );
-  const policy = [
-    "Runtime memory policy for this banking web app:",
-    "- You may call memory_search when bank-wide remembered context may help.",
-    "- You may call memory_save for durable organization-wide facts, confirmed plans, policies, procedures, or verified reusable operations lessons.",
-    "- There is no private long-term memory. Never save personal preferences, identity facts, private discussions, or other user-specific content; all saved memory is shared across authenticated accounts.",
-    "- Never save secrets, credentials, authorization codes, customer data, or raw transcripts.",
-    "- Memory and knowledge-governance actions are silent backend maintenance. Never mention tool names, MemFS, candidate IDs, review queues, review status, memory scopes, or background reflection unless the user explicitly asks about system internals.",
-    "- After an internal memory or knowledge action, answer only the business question; do not announce that anything was remembered, submitted, queued, or stored.",
-  ];
-  const textMessage = memoryContext
-    ? [
-        ...policy,
-        "",
-        "<LONG_TERM_MEMORY_CONTEXT>",
-        memoryContext,
-        "</LONG_TERM_MEMORY_CONTEXT>",
-        "",
-        "Use the memory context only when it is relevant. Do not reveal memory paths unless the user asks how memory was used.",
-        "",
-        input.message,
-      ].join("\n")
-    : [...policy, "", input.message].join("\n");
+}): Promise<{
+  message: SendMessage;
+  attachmentContext: AttachmentContextRecord[];
+}> {
+  const prepared = await prepareAttachments(input.attachments ?? []);
+  let memoryContext = "";
+  try {
+    memoryContext = formatMemoryContext(
+      await searchMemory({
+        agentId: input.agentId,
+        query: input.message,
+        limit: 5,
+      }),
+    );
+  } catch (error) {
+    // BGE-M3 can take a while to download and warm up after the first Docker
+    // start. Long-term memory is an enrichment layer, so a temporary RAG
+    // outage must not make the primary chat path unavailable.
+    console.warn("Semantic memory retrieval is temporarily unavailable", error);
+  }
+  const textMessage = composeRuntimeText(input.message, memoryContext);
 
-  return buildTurnMessage(textMessage, attachments);
+  return {
+    message: buildTurnMessage(textMessage, prepared.attachments),
+    attachmentContext: prepared.context,
+  };
 }
 
 export async function runConversationTurn(input: {
@@ -213,9 +202,10 @@ export async function runConversationTurn(input: {
   answer: string;
   lettaConversationId: string;
   durationMs: number;
+  attachmentContext: AttachmentContextRecord[];
 }> {
-  // The route serializes each conversation. Shared MemFS writes are disabled
-  // during normal turns, so different conversations can run concurrently.
+  // The route serializes each conversation. Different conversations may run
+  // concurrently; shared-memory writes are serialized by the memory service.
   return withGlobalTurnSlot(async () => {
     const sessionOptions: LettaCodeClientSessionOptions = {
       permissionMode: "unrestricted",
@@ -254,9 +244,9 @@ export async function runConversationTurn(input: {
         }
       }
 
-      const message = await buildRuntimeMessage(input);
+      const preparedMessage = await buildRuntimeMessage(input);
 
-      const result = await session.runTurn(message, {
+      const result = await session.runTurn(preparedMessage.message, {
         maxApprovalRecoveryAttempts: MAX_APPROVAL_RECOVERY_ATTEMPTS,
         recoveryTimeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
       });
@@ -274,6 +264,7 @@ export async function runConversationTurn(input: {
         ),
         lettaConversationId: conversationId,
         durationMs: result.durationMs,
+        attachmentContext: preparedMessage.attachmentContext,
       };
     } finally {
       session.close();
@@ -295,6 +286,7 @@ export async function streamConversationTurn(
   answer: string;
   lettaConversationId: string;
   durationMs: number;
+  attachmentContext: AttachmentContextRecord[];
 }> {
   return withGlobalTurnSlot(async () => {
     const sessionOptions: LettaCodeClientSessionOptions = {
@@ -328,9 +320,9 @@ export async function streamConversationTurn(
         }
       }
 
-      const message = await buildRuntimeMessage(input);
+      const preparedMessage = await buildRuntimeMessage(input);
       const startedAt = performance.now();
-      await session.send(message);
+      await session.send(preparedMessage.message);
 
       let finalResult: SDKResultMessage | null = null;
       let rawAssistantText = "";
@@ -390,6 +382,7 @@ export async function streamConversationTurn(
         ),
         lettaConversationId: conversationId,
         durationMs: finalResult.durationMs ?? Math.round(performance.now() - startedAt),
+        attachmentContext: preparedMessage.attachmentContext,
       };
     } finally {
       session.close();
@@ -435,9 +428,15 @@ export type TurnAttachment =
 
 async function prepareAttachments(
   attachments: TurnAttachment[],
-): Promise<TurnAttachment[]> {
-  return Promise.all(
-    attachments.map(async (attachment): Promise<TurnAttachment> => {
+): Promise<{
+  attachments: TurnAttachment[];
+  context: AttachmentContextRecord[];
+}> {
+  const prepared = await Promise.all(
+    attachments.map(async (attachment): Promise<{
+      attachment: TurnAttachment;
+      context: AttachmentContextRecord;
+    }> => {
       if (attachment.kind === "document") {
         const extracted = await extractDocumentText({
           name: attachment.name,
@@ -450,22 +449,64 @@ async function prepareAttachments(
             ? "Only the first 60,000 extracted characters are included because the document is long."
             : "The complete extractable document text is included below.";
         return {
-          kind: "text_file",
-          name: attachment.name,
-          mediaType: attachment.mediaType,
-          size: attachment.size,
-          text: [
-            `Document format: ${extracted.format}`,
-            extracted.details ?? "",
-            extractionNote,
-            "",
-            extracted.text,
-          ]
-            .filter((line, index) => line || index >= 3)
-            .join("\n"),
+          attachment: {
+            kind: "text_file",
+            name: attachment.name,
+            mediaType: attachment.mediaType,
+            size: attachment.size,
+            text: [
+              `Document format: ${extracted.format}`,
+              extracted.details ?? "",
+              extractionNote,
+              "",
+              extracted.text,
+            ]
+              .filter((line, index) => line || index >= 3)
+              .join("\n"),
+          },
+          context: {
+            name: attachment.name,
+            mediaType: attachment.mediaType,
+            size: attachment.size,
+            kind: "document",
+            extractionStatus: extracted.hasExtractableText ? "extracted" : "empty",
+            parser: "document-parser",
+            extractedText: extracted.text,
+            format: extracted.format,
+            truncated: extracted.truncated,
+            details: extracted.details,
+          },
         };
       }
-      if (attachment.kind !== "pdf") return attachment;
+      if (attachment.kind !== "pdf") {
+        if (attachment.kind === "text_file") {
+          return {
+            attachment,
+            context: {
+              name: attachment.name,
+              mediaType: attachment.mediaType,
+              size: attachment.size,
+              kind: "text_file",
+              extractionStatus: attachment.text.trim() ? "extracted" : "empty",
+              parser: "client-text",
+              extractedText: attachment.text.slice(0, 60_000),
+              truncated: attachment.text.length > 60_000,
+            },
+          };
+        }
+        return {
+          attachment,
+          context: {
+            name: attachment.name,
+            mediaType: attachment.mediaType,
+            size: attachment.size,
+            kind: attachment.kind,
+            extractionStatus:
+              attachment.kind === "image" ? "visual_only" : "metadata_only",
+            parser: attachment.kind === "image" ? "model-vision" : "none",
+          },
+        };
+      }
 
       const extracted = await extractPdfText(attachment.data);
       const extractionNote = !extracted.hasExtractableText
@@ -474,19 +515,37 @@ async function prepareAttachments(
           ? "Only the first 60,000 extracted characters are included because the document is long."
           : "The complete extractable PDF text is included below.";
       return {
-        kind: "text_file",
-        name: attachment.name,
-        mediaType: attachment.mediaType,
-        size: attachment.size,
-        text: [
-          `PDF pages: ${extracted.pages}`,
-          extractionNote,
-          "",
-          extracted.text,
-        ].join("\n"),
+        attachment: {
+          kind: "text_file",
+          name: attachment.name,
+          mediaType: attachment.mediaType,
+          size: attachment.size,
+          text: [
+            `PDF pages: ${extracted.pages}`,
+            extractionNote,
+            "",
+            extracted.text,
+          ].join("\n"),
+        },
+        context: {
+          name: attachment.name,
+          mediaType: attachment.mediaType,
+          size: attachment.size,
+          kind: "pdf",
+          extractionStatus: extracted.hasExtractableText ? "extracted" : "empty",
+          parser: "pdf-parse",
+          extractedText: extracted.text,
+          format: "PDF",
+          pageCount: extracted.pages,
+          truncated: extracted.truncated,
+        },
       };
     }),
   );
+  return {
+    attachments: prepared.map((item) => item.attachment),
+    context: prepared.map((item) => item.context),
+  };
 }
 
 function renderAttachmentContext(attachments: TurnAttachment[]): string {

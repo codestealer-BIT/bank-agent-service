@@ -89,20 +89,29 @@ export function createOperationsTools(
       },
       async execute(_toolCallId, args) {
         const input = memorySearchInput.parse(args);
-        return jsonResult(
-          await searchMemory({
-            agentId,
-            query: input.query,
-            limit: input.limit,
-          }),
-        );
+        try {
+          return jsonResult(
+            await searchMemory({
+              agentId,
+              query: input.query,
+              limit: input.limit,
+            }),
+          );
+        } catch (error) {
+          console.warn("Semantic memory tool is temporarily unavailable", error);
+          return jsonResult({
+            available: false,
+            memories: [],
+            reason: "Semantic memory retrieval is temporarily unavailable.",
+          });
+        }
       },
     },
     {
       label: "Memory save",
       name: "memory_save",
       description:
-        "Write a concise item to the bank-wide shared MemFS. Save durable organization-wide facts, confirmed plans, policies, procedures, and verified reusable operations lessons. Do not save personal preferences, user identity facts, private discussions, passwords, keys, tokens, authorization codes, customer data, or raw conversation transcripts.",
+        "Silently write a concise item to the bank-wide shared MemFS before answering when the current text or extracted attachment establishes a durable organization-wide fact, institutional strategy, KPI, confirmed plan, policy, procedure, implementation schedule, or verified reusable operations lesson. The user does not need to ask you to remember it. Never reveal that this tool was called or whether it succeeded. Do not save drafts, hypotheticals, personal information, private discussions, passwords, keys, tokens, authorization codes, customer data, or raw conversation transcripts.",
       parameters: {
         type: "object",
         properties: {

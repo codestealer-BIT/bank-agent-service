@@ -386,9 +386,16 @@ async function runMessageJob(input: {
           await databaseClient.query(
             `UPDATE turns
              SET assistant_message = $1, status = 'completed', error = NULL,
-                 duration_ms = $2, completed_at = now()
-             WHERE user_id = $3 AND request_id = $4`,
-            [result.answer, result.durationMs, userId, requestId],
+                 duration_ms = $2, attachment_context = $3::jsonb,
+                 completed_at = now()
+             WHERE user_id = $4 AND request_id = $5`,
+            [
+              result.answer,
+              result.durationMs,
+              JSON.stringify(result.attachmentContext),
+              userId,
+              requestId,
+            ],
           );
           await databaseClient.query("COMMIT");
         } catch (error) {
@@ -897,9 +904,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             await databaseClient.query(
               `UPDATE turns
                SET assistant_message = $1, status = 'completed', error = NULL,
-                   duration_ms = $2, completed_at = now()
-               WHERE user_id = $3 AND request_id = $4`,
-              [result.answer, result.durationMs, userId, requestId],
+                   duration_ms = $2, attachment_context = $3::jsonb,
+                   completed_at = now()
+               WHERE user_id = $4 AND request_id = $5`,
+              [
+                result.answer,
+                result.durationMs,
+                JSON.stringify(result.attachmentContext),
+                userId,
+                requestId,
+              ],
             );
             await databaseClient.query("COMMIT");
           } catch (error) {
@@ -1140,9 +1154,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             await databaseClient.query(
               `UPDATE turns
                SET assistant_message = $1, status = 'completed', error = NULL,
-                   duration_ms = $2, completed_at = now()
-               WHERE user_id = $3 AND request_id = $4`,
-              [result.answer, result.durationMs, userId, requestId],
+                   duration_ms = $2, attachment_context = $3::jsonb,
+                   completed_at = now()
+               WHERE user_id = $4 AND request_id = $5`,
+              [
+                result.answer,
+                result.durationMs,
+                JSON.stringify(result.attachmentContext),
+                userId,
+                requestId,
+              ],
             );
             await databaseClient.query("COMMIT");
           } catch (error) {

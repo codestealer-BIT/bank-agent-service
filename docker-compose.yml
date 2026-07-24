@@ -25,6 +25,13 @@ services:
       MEMORY_REFLECTION_ENABLED: ${MEMORY_REFLECTION_ENABLED:-true}
       MEMORY_REFLECTION_POLL_MS: ${MEMORY_REFLECTION_POLL_MS:-300000}
       MEMORY_REFLECTION_BATCH_SIZE: ${MEMORY_REFLECTION_BATCH_SIZE:-12}
+      RAG_EMBEDDING_BASE_URL: ${RAG_EMBEDDING_BASE_URL:-http://embeddings:80}
+      RAG_EMBEDDING_API_KEY: ${RAG_EMBEDDING_API_KEY:-}
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-BAAI/bge-m3}
+      RAG_EMBEDDING_TIMEOUT_MS: ${RAG_EMBEDDING_TIMEOUT_MS:-60000}
+      RAG_CHUNK_CHARS: ${RAG_CHUNK_CHARS:-1200}
+      RAG_CHUNK_OVERLAP_CHARS: ${RAG_CHUNK_OVERLAP_CHARS:-180}
+      RAG_MIN_SIMILARITY: ${RAG_MIN_SIMILARITY:-0.42}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,https://bank-agent.cloud.qyqiu.top:9003}
       SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
@@ -48,6 +55,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      embeddings:
+        condition: service_started
     healthcheck:
       test:
         [
@@ -67,7 +76,7 @@ services:
     mem_limit: 3g
 
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_DB: bank_agent
@@ -83,6 +92,36 @@ services:
     security_opt:
       - no-new-privileges:true
     mem_limit: 512m
+
+  embeddings:
+    image: michaelf34/infinity:0.0.77-cpu
+    restart: unless-stopped
+    command:
+      - "v2"
+      - "--model-id"
+      - "BAAI/bge-m3"
+      - "--engine"
+      - "torch"
+      - "--device"
+      - "cpu"
+      - "--dtype"
+      - "int8"
+      - "--batch-size"
+      - "4"
+      - "--no-compile"
+      - "--no-vector-disk-cache"
+      - "--port"
+      - "80"
+    environment:
+      DO_NOT_TRACK: "1"
+      HF_HOME: /app/.cache
+    volumes:
+      - bge_model_cache:/app/.cache
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 5g
 
   redis:
     image: redis:7-alpine
@@ -103,3 +142,4 @@ volumes:
   letta_state:
   postgres_data:
   redis_data:
+  bge_model_cache:

@@ -457,9 +457,16 @@ async function executePreparedScheduleTask(
          SET assistant_message = $1,
              status = 'completed',
              duration_ms = $2,
+             attachment_context = $3::jsonb,
              completed_at = now()
-         WHERE request_id = $3 AND user_id = $4`,
-        [result.answer, result.durationMs, requestId, schedule.user_id],
+         WHERE request_id = $4 AND user_id = $5`,
+        [
+          result.answer,
+          result.durationMs,
+          JSON.stringify(result.attachmentContext),
+          requestId,
+          schedule.user_id,
+        ],
       );
       await databaseClient.query(
         `UPDATE schedules

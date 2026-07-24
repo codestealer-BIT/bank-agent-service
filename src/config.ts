@@ -41,6 +41,25 @@ const envSchema = z.object({
     .positive()
     .default(300_000),
   MEMORY_REFLECTION_BATCH_SIZE: z.coerce.number().int().positive().default(12),
+  RAG_EMBEDDING_BASE_URL: z
+    .string()
+    .url()
+    .default("http://embeddings:80"),
+  RAG_EMBEDDING_API_KEY: optionalNonEmptyString,
+  RAG_EMBEDDING_MODEL: z.string().trim().min(1).default("BAAI/bge-m3"),
+  RAG_EMBEDDING_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(60_000),
+  RAG_CHUNK_CHARS: z.coerce.number().int().min(300).max(4_000).default(1_200),
+  RAG_CHUNK_OVERLAP_CHARS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(800)
+    .default(180),
+  RAG_MIN_SIMILARITY: z.coerce.number().min(-1).max(1).default(0.42),
   CORS_ORIGINS: z.string().default("http://localhost:8080"),
   SESSION_COOKIE_NAME: z.string().default("bank_agent_session"),
   SESSION_TTL_HOURS: z.coerce.number().int().positive().default(12),

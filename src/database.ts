@@ -11,6 +11,8 @@ export const pool = new Pool({
 });
 
 const migration = `
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE IF NOT EXISTS user_accounts (
   id TEXT PRIMARY KEY,
   username TEXT NOT NULL UNIQUE,
@@ -93,6 +95,9 @@ ALTER TABLE turns
 ALTER TABLE turns
   ADD COLUMN IF NOT EXISTS memory_reflection_error TEXT;
 
+ALTER TABLE turns
+  ADD COLUMN IF NOT EXISTS attachment_context JSONB NOT NULL DEFAULT '[]'::jsonb;
+
 CREATE INDEX IF NOT EXISTS turns_memory_reflection_idx
   ON turns(user_id, completed_at)
   WHERE status = 'completed' AND memory_reflected_at IS NULL;
@@ -114,6 +119,25 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
 
 CREATE INDEX IF NOT EXISTS knowledge_candidates_status_created_idx
   ON knowledge_candidates(status, created_at);
+
+CREATE TABLE IF NOT EXISTS memory_chunks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  embedding_model TEXT NOT NULL,
+  embedding vector(1024) NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (agent_id, path, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS memory_chunks_agent_model_idx
+  ON memory_chunks(agent_id, embedding_model);
+
+CREATE INDEX IF NOT EXISTS memory_chunks_embedding_hnsw_idx
+  ON memory_chunks USING hnsw (embedding vector_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS schedules (
   id UUID PRIMARY KEY,
