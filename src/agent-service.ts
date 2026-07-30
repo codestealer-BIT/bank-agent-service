@@ -26,6 +26,7 @@ import {
   syncSharedOperationsPersona,
 } from "./agent-persona.js";
 import { composeRuntimeText } from "./runtime-message.js";
+import { composeExplicitSkillRuntimeMessage } from "./skill-service.js";
 import {
   withDistributedLock,
   withGlobalTurnSlot,
@@ -230,7 +231,10 @@ async function buildRuntimeMessage(input: {
     console.warn("Semantic memory retrieval is temporarily unavailable", error);
   }
   const memoryRetrievalMs = Math.round(performance.now() - memoryStartedAt);
-  const textMessage = composeRuntimeText(input.message, memoryContext);
+  const textMessage = composeRuntimeText(
+    composeExplicitSkillRuntimeMessage(input.message),
+    memoryContext,
+  );
 
   if (prepared.diagnostics.inputCount > 0) {
     console.info(

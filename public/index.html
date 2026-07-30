@@ -85,6 +85,10 @@
             <span class="workspace-nav-title">基础设施资产</span>
             <span class="workspace-nav-copy">查看机房、主机与健康状态</span>
           </button>
+          <button id="navVendors" class="workspace-nav-item" type="button">
+            <span class="workspace-nav-title">维保厂商信息</span>
+            <span class="workspace-nav-copy">查看厂商、服务范围与联系人</span>
+          </button>
           <button id="navAssistant" class="workspace-nav-item" type="button">
             <span class="workspace-nav-title">智能运维助手</span>
             <span class="workspace-nav-copy">会话、安排与智能巡检</span>
@@ -166,6 +170,7 @@
                       <th>IP 地址</th>
                       <th>主机名</th>
                       <th>所属机房</th>
+                      <th>维保厂商</th>
                       <th>机柜</th>
                       <th>用途</th>
                       <th>CPU</th>
@@ -178,6 +183,37 @@
                 <div id="emptyState" class="empty-state" hidden>没有符合条件的机器。</div>
               </div>
             </section>
+          </section>
+
+          <section id="vendorsPage" class="page-section vendors-page" hidden>
+            <section class="vendor-hero">
+              <div>
+                <span class="section-eyebrow">MAINTENANCE PARTNERS</span>
+                <h1>维保厂商信息</h1>
+                <p>统一查看基础设施维保单位、服务范围与应急联系人。</p>
+              </div>
+              <div class="vendor-hero-stat">
+                <small>合作厂商</small>
+                <strong id="vendorCount">--</strong>
+                <span>家</span>
+              </div>
+            </section>
+
+            <section class="vendor-tools" aria-label="厂商筛选">
+              <div>
+                <h2>厂商与联系人</h2>
+                <p>需要报修时，可按厂商名称、联系人或服务范围快速查找。</p>
+              </div>
+              <label class="vendor-search">
+                <span>搜索厂商</span>
+                <input id="vendorSearch" type="search" placeholder="厂商、联系人、服务范围" />
+              </label>
+            </section>
+
+            <div id="vendorCards" class="vendor-grid"></div>
+            <div id="vendorEmptyState" class="vendor-empty-state" hidden>
+              没有符合条件的维保厂商。
+            </div>
           </section>
 
           <section id="assistantPage" class="page-section assistant-page" hidden>
@@ -226,6 +262,13 @@
 
                   <div class="composer-wrap">
                     <div class="suggestions" id="assistantSuggestions"></div>
+                    <div id="skillPalette" class="skill-palette" hidden>
+                      <div class="skill-palette-header">
+                        <strong>技能</strong>
+                        <span>↑↓ 选择 · Enter 调用 · Esc 关闭</span>
+                      </div>
+                      <div id="skillPaletteList" class="skill-palette-list"></div>
+                    </div>
                     <form id="chatComposer" class="composer">
                       <input
                         id="attachmentInput"

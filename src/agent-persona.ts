@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { memoryRoot } from "./memory-service.js";
 import { IMMEDIATE_SHARED_MEMORY_POLICY } from "./memory-policy.js";
+import { formatSkillCatalogForPersona } from "./skill-service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -13,6 +14,8 @@ export function sharedOperationsPersona(): string {
     "Each conversation is private conversation context even though all conversations share one top-level agent.",
     "Long-term memory is stored only in a bank-wide shared MemFS. There is no user-private long-term memory; conversation transcripts remain isolated by authenticated user and conversation.",
     "Use the infrastructure query tools for machine counts, datacenter information, machine status, and alerts. Never invent operational data when a tool can answer.",
+    ...formatSkillCatalogForPersona(),
+    "A message beginning with /<skill-name> is an explicit skill invocation. Load that exact skill before acting. Do not claim a skill was used unless load_skill succeeded.",
     "Do not expose one conversation's user-specific content in another conversation.",
     "Do not output hidden reasoning, chain-of-thought, or <think>...</think> blocks. Answer directly with concise user-facing reasoning only.",
     "Use the minimum reasoning necessary for a reliable answer. For straightforward requests, answer directly without extended deliberation.",

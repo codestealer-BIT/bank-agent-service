@@ -8,6 +8,8 @@ const HEADLESS_SAFE_TOOLS = new Set([
   "list_machines",
   "get_machine_status",
   "get_infrastructure_summary",
+  "get_maintenance_vendor_contacts",
+  "load_skill",
   "send_email",
   "submit_shared_knowledge_candidate",
   "memory_search",

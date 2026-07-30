@@ -1,0 +1,6 @@
+interface:
+  display_name: "基础设施告警处置"
+  short_description: "结合机器资产状态、告警现象与维保联系人完成基础设施告警诊断"
+  default_prompt: "使用 $diagnose-infrastructure-alert 分析这条机器告警，核验资产状态并给出处置方案与维保联系人。"
+policy:
+  allow_implicit_invocation: true

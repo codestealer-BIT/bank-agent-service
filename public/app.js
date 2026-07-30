@@ -8,8 +8,10 @@
   const loginError = document.querySelector("#loginError");
 
   const navInfrastructure = document.querySelector("#navInfrastructure");
+  const navVendors = document.querySelector("#navVendors");
   const navAssistant = document.querySelector("#navAssistant");
   const infrastructurePage = document.querySelector("#infrastructurePage");
+  const vendorsPage = document.querySelector("#vendorsPage");
   const assistantPage = document.querySelector("#assistantPage");
 
   const machineRows = document.querySelector("#machineRows");
@@ -18,6 +20,9 @@
   const statusFilter = document.querySelector("#statusFilter");
   const machineSearch = document.querySelector("#machineSearch");
   const selectedDatacenters = new Set();
+  const vendorCards = document.querySelector("#vendorCards");
+  const vendorSearch = document.querySelector("#vendorSearch");
+  const vendorEmptyState = document.querySelector("#vendorEmptyState");
 
   const assistantSchedulesTab = document.querySelector("#assistantSchedulesTab");
   const assistantNewChat = document.querySelector("#assistantNewChat");
@@ -36,6 +41,8 @@
   const attachButton = document.querySelector("#attachButton");
   const attachmentMenu = document.querySelector("#attachmentMenu");
   const attachmentPreview = document.querySelector("#attachmentPreview");
+  const skillPalette = document.querySelector("#skillPalette");
+  const skillPaletteList = document.querySelector("#skillPaletteList");
 
   const scheduleTabs = [...document.querySelectorAll(".schedule-tab")];
   const scheduleList = document.querySelector("#scheduleList");
@@ -73,6 +80,7 @@
   let currentPage = "infrastructure";
   let assistantView = "schedules";
   let datacenters = [];
+  let vendors = [];
   let searchTimer = null;
   let conversationId = null;
   let creatingConversation = false;
@@ -86,6 +94,9 @@
   let scheduleFilter = "all";
   let suppressMessageAutoScroll = false;
   let pendingAttachments = [];
+  let skills = [];
+  let visibleSkills = [];
+  let skillSelectionIndex = 0;
 
   const setButtonBusy = (button, busy, label = "") => {
     if (!button) return;
@@ -122,6 +133,85 @@
       });
     }
     return body;
+  };
+
+  const loadSkills = async () => {
+    const result = await request("/v1/skills");
+    skills = Array.isArray(result.skills) ? result.skills : [];
+  };
+
+  const closeSkillPalette = () => {
+    skillPalette.hidden = true;
+    visibleSkills = [];
+    skillSelectionIndex = 0;
+  };
+
+  const selectSkill = (skill) => {
+    chatInput.value = `/${skill.name} `;
+    closeSkillPalette();
+    chatInput.focus();
+    chatInput.style.height = "auto";
+    chatInput.style.height = `${Math.min(chatInput.scrollHeight, 120)}px`;
+    updateComposerState();
+  };
+
+  const renderSkillPalette = () => {
+    skillPaletteList.replaceChildren();
+    visibleSkills.forEach((skill, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "skill-palette-item";
+      button.classList.toggle("active", index === skillSelectionIndex);
+      button.setAttribute("role", "option");
+      button.setAttribute(
+        "aria-selected",
+        index === skillSelectionIndex ? "true" : "false",
+      );
+
+      const icon = document.createElement("span");
+      icon.className = "skill-palette-icon";
+      icon.textContent = "◇";
+      const content = document.createElement("span");
+      content.className = "skill-palette-content";
+      const heading = document.createElement("span");
+      heading.className = "skill-palette-name";
+      heading.textContent = skill.display_name;
+      const description = document.createElement("span");
+      description.className = "skill-palette-description";
+      description.textContent = skill.short_description;
+      const command = document.createElement("code");
+      command.textContent = `/${skill.name}`;
+      content.append(heading, description);
+      button.append(icon, content, command);
+      button.addEventListener("mousedown", (event) => event.preventDefault());
+      button.addEventListener("click", () => selectSkill(skill));
+      skillPaletteList.append(button);
+    });
+  };
+
+  const updateSkillPalette = () => {
+    const match = chatInput.value.match(/^\/([^\s]*)$/);
+    if (!match || !skills.length) {
+      closeSkillPalette();
+      return;
+    }
+    const query = match[1].toLowerCase();
+    visibleSkills = skills.filter((skill) =>
+      [skill.name, skill.display_name, skill.short_description]
+        .join(" ")
+        .toLowerCase()
+        .includes(query),
+    );
+    if (!visibleSkills.length) {
+      closeSkillPalette();
+      return;
+    }
+    skillSelectionIndex = Math.min(
+      skillSelectionIndex,
+      visibleSkills.length - 1,
+    );
+    renderSkillPalette();
+    skillPalette.hidden = false;
   };
 
   const wait = (milliseconds) =>
@@ -756,6 +846,7 @@
         machine.ip,
         machine.hostname,
         machine.datacenter_name,
+        machine.maintenance_vendor_name,
         machine.rack,
         machine.role,
       ];
@@ -840,6 +931,125 @@
       renderDatacenterFilters();
     }
     await loadInfrastructure();
+  };
+
+  const renderVendors = () => {
+    const keyword = vendorSearch.value.trim().toLowerCase();
+    const filtered = vendors.filter((vendor) => {
+      const searchable = [
+        vendor.name,
+        vendor.short_name,
+        vendor.service_level,
+        vendor.hotline,
+        vendor.email,
+        ...(vendor.service_scope ?? []),
+        ...(vendor.contacts ?? []).flatMap((contact) => [
+          contact.name,
+          contact.title,
+          contact.mobile,
+          contact.email,
+          contact.service_region,
+        ]),
+      ]
+        .join(" ")
+        .toLowerCase();
+      return !keyword || searchable.includes(keyword);
+    });
+
+    vendorCards.innerHTML = "";
+    vendorEmptyState.hidden = filtered.length > 0;
+    filtered.forEach((vendor, vendorIndex) => {
+      const card = document.createElement("article");
+      card.className = "vendor-card";
+
+      const heading = document.createElement("div");
+      heading.className = "vendor-card-heading";
+      const mark = document.createElement("span");
+      mark.className = `vendor-mark vendor-mark-${(vendorIndex % 3) + 1}`;
+      mark.textContent = vendor.short_name.slice(0, 1);
+      const identity = document.createElement("div");
+      const name = document.createElement("h2");
+      name.textContent = vendor.name;
+      const level = document.createElement("p");
+      level.textContent = vendor.service_level;
+      identity.append(name, level);
+      heading.append(mark, identity);
+
+      const meta = document.createElement("div");
+      meta.className = "vendor-meta";
+      const hotline = document.createElement("a");
+      hotline.href = `tel:${vendor.hotline.replaceAll("-", "")}`;
+      const hotlineLabel = document.createElement("small");
+      hotlineLabel.textContent = "统一服务热线";
+      const hotlineValue = document.createElement("strong");
+      hotlineValue.textContent = vendor.hotline;
+      hotline.append(hotlineLabel, hotlineValue);
+      const email = document.createElement("a");
+      email.href = `mailto:${vendor.email}`;
+      const emailLabel = document.createElement("small");
+      emailLabel.textContent = "服务邮箱";
+      const emailValue = document.createElement("strong");
+      emailValue.textContent = vendor.email;
+      email.append(emailLabel, emailValue);
+      meta.append(hotline, email);
+
+      const scopes = document.createElement("div");
+      scopes.className = "vendor-scopes";
+      (vendor.service_scope ?? []).forEach((scope) => {
+        const tag = document.createElement("span");
+        tag.textContent = scope;
+        scopes.append(tag);
+      });
+
+      const contactTitle = document.createElement("h3");
+      contactTitle.textContent = "维保联系人";
+      const contacts = document.createElement("div");
+      contacts.className = "vendor-contacts";
+      (vendor.contacts ?? []).forEach((contact) => {
+        const item = document.createElement("section");
+        item.className = "vendor-contact";
+        const avatar = document.createElement("span");
+        avatar.className = "vendor-contact-avatar";
+        avatar.textContent = contact.name.slice(0, 1);
+        const details = document.createElement("div");
+        const contactName = document.createElement("strong");
+        contactName.textContent = contact.name;
+        const role = document.createElement("small");
+        role.textContent = `${contact.title} · ${contact.service_region}`;
+        const links = document.createElement("div");
+        const mobile = document.createElement("a");
+        mobile.href = `tel:${contact.mobile.replaceAll(" ", "")}`;
+        mobile.textContent = contact.mobile;
+        const contactEmail = document.createElement("a");
+        contactEmail.href = `mailto:${contact.email}`;
+        contactEmail.textContent = contact.email;
+        links.append(mobile, contactEmail);
+        const availability = document.createElement("span");
+        availability.className = "vendor-availability";
+        availability.textContent = contact.availability;
+        details.append(contactName, role, links, availability);
+        item.append(avatar, details);
+        contacts.append(item);
+      });
+
+      card.append(heading, meta, scopes, contactTitle, contacts);
+      vendorCards.append(card);
+    });
+  };
+
+  const loadVendors = async () => {
+    try {
+      if (!vendors.length) {
+        const result = await request("/v1/infrastructure/vendors");
+        vendors = result.vendors ?? [];
+      }
+      document.querySelector("#vendorCount").textContent = vendors.length;
+      renderVendors();
+    } catch (error) {
+      vendorCards.innerHTML = "";
+      vendorEmptyState.hidden = false;
+      vendorEmptyState.textContent = `维保厂商数据加载失败：${error.message}`;
+    }
   };
 
   const updateAssistantButtons = () => {
@@ -1432,16 +1642,23 @@
   const showPage = async (page) => {
     currentPage = page;
     const assistant = page === "assistant";
-    navInfrastructure.classList.toggle("active", !assistant);
+    const infrastructure = page === "infrastructure";
+    const vendorDirectory = page === "vendors";
+    navInfrastructure.classList.toggle("active", infrastructure);
+    navVendors.classList.toggle("active", vendorDirectory);
     navAssistant.classList.toggle("active", assistant);
-    infrastructurePage.classList.toggle("active", !assistant);
+    infrastructurePage.classList.toggle("active", infrastructure);
+    vendorsPage.classList.toggle("active", vendorDirectory);
     assistantPage.classList.toggle("active", assistant);
-    infrastructurePage.hidden = assistant;
+    infrastructurePage.hidden = !infrastructure;
+    vendorsPage.hidden = !vendorDirectory;
     assistantPage.hidden = !assistant;
 
     if (assistant) {
       updateAssistantButtons();
       await Promise.all([refreshConversations(), loadSchedules(), loadTemplates()]);
+    } else if (vendorDirectory) {
+      await loadVendors();
     } else {
       await initializeInfrastructure();
     }
@@ -1453,6 +1670,7 @@
     appShell.hidden = false;
     updateHeader();
     resetChatMessages();
+    await loadSkills();
     await showPage("infrastructure");
   };
 
@@ -1534,7 +1752,9 @@
   });
 
   navInfrastructure.addEventListener("click", () => void showPage("infrastructure"));
+  navVendors.addEventListener("click", () => void showPage("vendors"));
   navAssistant.addEventListener("click", () => void showPage("assistant"));
+  vendorSearch.addEventListener("input", renderVendors);
   document
     .querySelector("#openAssistantFromInfra")
     ?.addEventListener("click", () => void showPage("assistant"));
@@ -1566,10 +1786,35 @@
 
   chatComposer.addEventListener("submit", (event) => {
     event.preventDefault();
+    closeSkillPalette();
     void submitMessage(chatInput.value);
   });
 
   chatInput.addEventListener("keydown", (event) => {
+    if (!skillPalette.hidden) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        skillSelectionIndex =
+          (skillSelectionIndex + direction + visibleSkills.length) %
+          visibleSkills.length;
+        renderSkillPalette();
+        skillPaletteList
+          .querySelector(".skill-palette-item.active")
+          ?.scrollIntoView({ block: "nearest" });
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSkillPalette();
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        selectSkill(visibleSkills[skillSelectionIndex]);
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       chatComposer.requestSubmit();
@@ -1579,6 +1824,7 @@
   chatInput.addEventListener("input", () => {
     chatInput.style.height = "auto";
     chatInput.style.height = `${Math.min(chatInput.scrollHeight, 120)}px`;
+    updateSkillPalette();
     updateComposerState();
   });
 

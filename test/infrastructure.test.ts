@@ -5,6 +5,7 @@ import {
   filterMachines,
   findMachine,
   infrastructureSummary,
+  maintenanceVendors,
   machines,
 } from "../src/infrastructure.js";
 
@@ -12,6 +13,9 @@ test("provides stable demo datacenters and machines", () => {
   assert.equal(datacenters.length, 4);
   assert.equal(machines.length, 36);
   assert.equal(new Set(machines.map((item) => item.ip)).size, machines.length);
+  assert.equal(maintenanceVendors.length, 3);
+  assert.ok(machines.every((item) => item.maintenance_vendor_name));
+  assert.ok(maintenanceVendors.every((item) => item.contacts.length >= 2));
 });
 
 test("filters machines by datacenter, status, and keyword", () => {
@@ -26,6 +30,17 @@ test("filters machines by datacenter, status, and keyword", () => {
 
   const found = filterMachines({ keyword: machines[0].ip });
   assert.deepEqual(found.map((item) => item.id), [machines[0].id]);
+
+  const byVendor = filterMachines({
+    keyword: machines[0].maintenance_vendor_name,
+  });
+  assert.ok(byVendor.length > 0);
+  assert.ok(
+    byVendor.every(
+      (item) =>
+        item.maintenance_vendor_name === machines[0].maintenance_vendor_name,
+    ),
+  );
 });
 
 test("summarizes selected datacenters and finds a machine", () => {

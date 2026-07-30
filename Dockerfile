@@ -26,6 +26,7 @@ COPY package.json package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY public ./public
+COPY skills ./skills
 
 RUN mkdir -p /data/local-backend /data/home /workspace \
     && chown -R bankagent:bankagent /data /workspace

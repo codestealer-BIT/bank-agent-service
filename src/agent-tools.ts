@@ -5,11 +5,13 @@ import {
   datacenters,
   filterMachines,
   findMachine,
+  findMaintenanceVendor,
   infrastructureSummary,
 } from "./infrastructure.js";
 import { containsSensitiveKnowledge, normalizeTags } from "./knowledge-policy.js";
 import { sendConfiguredEmail } from "./mail-service.js";
 import { saveMemory, searchMemory } from "./memory-service.js";
+import { getSkill, listSkills } from "./skill-service.js";
 
 function jsonResult(value: unknown) {
   return {
@@ -26,6 +28,14 @@ const listMachinesInput = z.object({
 
 const machineInput = z.object({
   ip_or_hostname: z.string().min(1),
+});
+
+const vendorInput = z.object({
+  vendor_id_or_name: z.string().min(1),
+});
+
+const skillInput = z.object({
+  name: z.string().regex(/^[a-z0-9-]+$/),
 });
 
 const summaryInput = z.object({
@@ -60,7 +70,9 @@ export const OPERATIONS_TOOL_NAMES = [
   "list_datacenters",
   "list_machines",
   "get_machine_status",
+  "get_maintenance_vendor_contacts",
   "get_infrastructure_summary",
+  "load_skill",
   "send_email",
   "submit_shared_knowledge_candidate",
   "memory_search",
@@ -198,6 +210,65 @@ export function createOperationsTools(
           findMachine(input.ip_or_hostname) ?? {
             error: "Machine not found",
           },
+        );
+      },
+    },
+    {
+      label: "维保厂商联系人",
+      name: "get_maintenance_vendor_contacts",
+      description:
+        "根据维保厂商编号或名称查询厂商联系人、手机号、邮箱、服务范围和响应级别。通常先查询机器状态，再使用机器记录中的维保厂商调用本工具。",
+      parameters: {
+        type: "object",
+        properties: {
+          vendor_id_or_name: { type: "string" },
+        },
+        required: ["vendor_id_or_name"],
+        additionalProperties: false,
+      },
+      async execute(_toolCallId, args) {
+        const input = vendorInput.parse(args);
+        const vendor = findMaintenanceVendor(input.vendor_id_or_name);
+        return jsonResult(
+          vendor
+            ? { found: true, vendor }
+            : {
+                found: false,
+                error: "Maintenance vendor not found",
+                query: input.vendor_id_or_name,
+              },
+        );
+      },
+    },
+    {
+      label: "加载技能",
+      name: "load_skill",
+      description:
+        "按技能名加载完整的标准操作说明。用户使用 /技能名 显式调用时必须加载；普通对话与某个技能的名称或描述明显匹配时也应主动加载。",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", pattern: "^[a-z0-9-]+$" },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+      async execute(_toolCallId, args) {
+        const input = skillInput.parse(args);
+        const skill = getSkill(input.name);
+        return jsonResult(
+          skill
+            ? {
+                found: true,
+                name: skill.name,
+                description: skill.description,
+                instructions: skill.instructions,
+              }
+            : {
+                found: false,
+                error: "Skill not found",
+                available_skills: listSkills(),
+              },
         );
       },
     },

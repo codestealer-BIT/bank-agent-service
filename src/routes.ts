@@ -21,7 +21,9 @@ import {
   datacenters,
   filterMachines,
   infrastructureSummary,
+  maintenanceVendors,
 } from "./infrastructure.js";
+import { listSkills } from "./skill-service.js";
 import {
   createSchedule,
   deleteSchedule,
@@ -538,6 +540,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/v1/infrastructure/datacenters", async () => ({
     datacenters,
+  }));
+
+  app.get("/v1/infrastructure/vendors", async () => ({
+    vendors: maintenanceVendors,
+  }));
+
+  app.get("/v1/skills", async () => ({
+    skills: listSkills(),
   }));
 
   app.get<{
