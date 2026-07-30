@@ -138,6 +138,18 @@ function toTurnAttachments(
       };
     }
     if (attachment.kind === "document") {
+      if (
+        attachment.media_type === "application/pdf" ||
+        /\.pdf$/i.test(attachment.name)
+      ) {
+        return {
+          kind: "pdf",
+          name: attachment.name,
+          mediaType: "application/pdf",
+          data: attachment.data,
+          size: attachment.size,
+        };
+      }
       return {
         kind: "document",
         name: attachment.name,

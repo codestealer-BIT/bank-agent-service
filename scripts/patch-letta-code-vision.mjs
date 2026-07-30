@@ -45,5 +45,5 @@ if (!source.includes("function isVisionCapableCustomModel(modelId)")) {
 
 writeFileSync(lettaCodeBundle, source);
 console.log(
-  "Patched Letta Code local provider capability detection: MiniMax-M3 now accepts image input.",
+  "Patched Letta Code local provider vision capability.",
 );

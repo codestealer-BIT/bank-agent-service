@@ -380,7 +380,9 @@
           method: "POST",
           body: JSON.stringify({
             message: text,
-            request_id: crypto.randomUUID(),
+            request_id:
+              globalThis.crypto?.randomUUID?.() ??
+              `request-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           }),
         },
       );

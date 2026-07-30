@@ -20,6 +20,9 @@ const envSchema = z.object({
     .default("postgres://bank_agent:bank_agent@postgres:5432/bank_agent"),
   REDIS_URL: z.string().default("redis://redis:6379"),
   AGENT_MODEL: z.string().default("lmstudio/MiniMax-M3"),
+  AGENT_REASONING_EFFORT: z
+    .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
+    .default("none"),
   AGENT_NAME: z.string().default("澄川智能助手"),
   SHARED_AGENT_SCOPE: z.string().default("bank-operations-demo"),
   LETTA_LOCAL_BACKEND_DIR: z.string().default("/data/letta"),

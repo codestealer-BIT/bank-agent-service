@@ -79,6 +79,7 @@
   let conversations = [];
   let pendingConversationIds = new Set();
   const conversationStreams = new Map();
+  const streamAnimationFrames = new Map();
   let conversationLoadVersion = 0;
   let schedules = [];
   let templates = [];
@@ -125,6 +126,10 @@
 
   const wait = (milliseconds) =>
     new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+
+  const createRequestId = () =>
+    globalThis.crypto?.randomUUID?.() ??
+    `request-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   const streamRequest = async (path, payload, onEvent) => {
     const maximumAttempts = 4;
@@ -348,10 +353,18 @@
     return wrapper;
   };
 
-  const appendMessage = (content, role, extra = "", shouldScroll = true) => {
+  const appendMessage = (content, role, extra = "", shouldScroll = false) => {
     const element = document.createElement("div");
     element.className = `msg ${role} ${extra}`.trim();
-    element.textContent = content;
+    if (role === "assistant" && !extra) {
+      if (window.BankMarkdown?.render) {
+        window.BankMarkdown.render(element, content);
+      } else {
+        element.textContent = content;
+      }
+    } else {
+      element.textContent = content;
+    }
     messages.append(element);
     if (shouldScroll && !suppressMessageAutoScroll) {
       messages.scrollTop = messages.scrollHeight;
@@ -364,7 +377,7 @@
       (element) => element.dataset.streamRequestId === requestId,
     ) ?? null;
 
-  const renderConversationStream = (targetConversationId, shouldScroll = true) => {
+  const renderConversationStream = (targetConversationId, shouldScroll = false) => {
     if (assistantView !== "chat" || conversationId !== targetConversationId) return;
     const state = conversationStreams.get(targetConversationId);
     if (!state) return;
@@ -381,10 +394,19 @@
       element.textContent = state.error || "智能体请求失败";
     } else if (state.status === "completed") {
       element.className = "msg assistant";
-      element.textContent = state.answer || state.text || "智能体暂时没有返回文字。";
+      const answer = state.answer || state.text || "智能体暂时没有返回文字。";
+      if (window.BankMarkdown?.render) {
+        window.BankMarkdown.render(element, answer);
+      } else {
+        element.textContent = answer;
+      }
     } else if (state.text) {
       element.className = "msg assistant";
-      element.textContent = state.text;
+      if (window.BankMarkdown?.render) {
+        window.BankMarkdown.render(element, state.text);
+      } else {
+        element.textContent = state.text;
+      }
     } else {
       element.className = "msg assistant waiting";
       element.textContent = state.waitingText;
@@ -393,6 +415,90 @@
     if (shouldScroll && !suppressMessageAutoScroll) {
       messages.scrollTop = messages.scrollHeight;
     }
+  };
+
+  const streamCharactersPerFrame = (backlog) => {
+    if (backlog > 2_000) return 48;
+    if (backlog > 800) return 24;
+    if (backlog > 300) return 12;
+    if (backlog > 120) return 6;
+    if (backlog > 40) return 3;
+    return 1;
+  };
+
+  const cancelStreamAnimation = (requestId) => {
+    const frame = streamAnimationFrames.get(requestId);
+    if (frame) window.cancelAnimationFrame(frame);
+    streamAnimationFrames.delete(requestId);
+  };
+
+  const animateConversationStream = (targetConversationId, requestId) => {
+    if (streamAnimationFrames.has(requestId)) return;
+
+    const draw = () => {
+      streamAnimationFrames.delete(requestId);
+      const state = conversationStreams.get(targetConversationId);
+      if (!state || state.requestId !== requestId || state.status === "failed") return;
+
+      const backlog = state.pendingCharacters?.length ?? 0;
+      if (backlog > 0) {
+        const count = streamCharactersPerFrame(backlog);
+        state.text += state.pendingCharacters.splice(0, count).join("");
+        renderConversationStream(targetConversationId);
+      }
+
+      if (state.pendingCharacters?.length) {
+        streamAnimationFrames.set(requestId, window.requestAnimationFrame(draw));
+        return;
+      }
+
+      if (state.finalAnswer !== null && state.finalAnswer !== undefined) {
+        state.status = "completed";
+        state.answer = state.finalAnswer;
+        renderConversationStream(targetConversationId);
+        state.resolveAnimation?.();
+        state.resolveAnimation = null;
+      }
+    };
+
+    streamAnimationFrames.set(requestId, window.requestAnimationFrame(draw));
+  };
+
+  const enqueueConversationDelta = (targetConversationId, requestId, text) => {
+    if (!text) return;
+    const state = conversationStreams.get(targetConversationId);
+    if (!state || state.requestId !== requestId) return;
+    state.receivedText += text;
+    state.pendingCharacters.push(...Array.from(text));
+    animateConversationStream(targetConversationId, requestId);
+  };
+
+  const finishConversationStream = (targetConversationId, requestId, answer) => {
+    const state = conversationStreams.get(targetConversationId);
+    if (!state || state.requestId !== requestId) return Promise.resolve();
+
+    const finalAnswer = answer || state.receivedText || state.text;
+    if (finalAnswer.startsWith(state.receivedText)) {
+      const remainder = finalAnswer.slice(state.receivedText.length);
+      if (remainder) {
+        state.receivedText += remainder;
+        state.pendingCharacters.push(...Array.from(remainder));
+      }
+    }
+    state.finalAnswer = finalAnswer;
+    state.status = "finishing";
+
+    if (!state.pendingCharacters.length) {
+      state.status = "completed";
+      state.answer = finalAnswer;
+      renderConversationStream(targetConversationId);
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      state.resolveAnimation = resolve;
+      animateConversationStream(targetConversationId, requestId);
+    });
   };
 
   const formatBytes = (bytes = 0) => {
@@ -414,10 +520,62 @@
 
   const isSupportedDocument = (file) => supportedDocumentPattern.test(file.name);
 
+  const isPdfFile = (file) =>
+    file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+
   const attachmentIcon = (attachment) => {
     if (attachment.kind === "image") return "IMG";
     const extension = attachment.name.split(".").pop()?.toUpperCase() ?? "FILE";
     return extension.slice(0, 5);
+  };
+
+  let imagePreviewLightbox = null;
+
+  const ensureImagePreviewLightbox = () => {
+    if (imagePreviewLightbox) return imagePreviewLightbox;
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "image-lightbox";
+    backdrop.hidden = true;
+
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "image-lightbox-close";
+    closeButton.setAttribute("aria-label", "Close image preview");
+    closeButton.textContent = "×";
+
+    const image = document.createElement("img");
+    image.className = "image-lightbox-img";
+    image.alt = "";
+
+    backdrop.append(closeButton, image);
+    document.body.append(backdrop);
+
+    const close = () => {
+      backdrop.hidden = true;
+      image.removeAttribute("src");
+      document.body.classList.remove("image-lightbox-open");
+    };
+
+    closeButton.addEventListener("click", close);
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) close();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (!backdrop.hidden && event.key === "Escape") close();
+    });
+
+    imagePreviewLightbox = { backdrop, image };
+    return imagePreviewLightbox;
+  };
+
+  const openImagePreview = (attachment) => {
+    if (!attachment.previewUrl) return;
+    const lightbox = ensureImagePreviewLightbox();
+    lightbox.image.src = attachment.previewUrl;
+    lightbox.image.alt = attachment.name;
+    lightbox.backdrop.hidden = false;
+    document.body.classList.add("image-lightbox-open");
   };
 
   const renderAttachmentPreview = () => {
@@ -427,10 +585,16 @@
       const item = document.createElement("div");
       item.className = `attachment-chip ${attachment.kind}`;
       if (attachment.kind === "image") {
+        const previewButton = document.createElement("button");
+        previewButton.type = "button";
+        previewButton.className = "attachment-image-preview";
+        previewButton.setAttribute("aria-label", `Preview ${attachment.name}`);
         const image = document.createElement("img");
         image.src = attachment.previewUrl;
         image.alt = attachment.name;
-        item.append(image);
+        previewButton.append(image);
+        previewButton.addEventListener("click", () => openImagePreview(attachment));
+        item.append(previewButton);
       } else {
         const icon = document.createElement("span");
         icon.className = "attachment-file-icon";
@@ -507,6 +671,20 @@
             data,
             size: file.size,
             previewUrl: dataUrl,
+          });
+        } else if (isPdfFile(file)) {
+          if (file.size > 20 * 1024 * 1024) {
+            errors.push(`${file.name} 超过 20MB，无法解析。`);
+            continue;
+          }
+          const dataUrl = await readAsDataUrl(file);
+          const [, data = ""] = dataUrl.split(",");
+          pendingAttachments.push({
+            kind: "pdf",
+            name: file.name,
+            media_type: "application/pdf",
+            data,
+            size: file.size,
           });
         } else if (isSupportedDocument(file)) {
           if (file.size > 20 * 1024 * 1024) {
@@ -859,7 +1037,7 @@
     const messageText = text || "请分析我上传的附件。";
     appendMessage(`${messageText}${attachmentSummary(attachments)}`, "user");
     const waiting = appendMessage("正在查询智能体…", "assistant", "waiting");
-    const requestId = crypto.randomUUID();
+    const requestId = createRequestId();
     waiting.dataset.streamRequestId = requestId;
     let targetConversationId = conversationId;
 
@@ -887,6 +1065,10 @@
       requestId,
       status: "pending",
       text: "",
+      receivedText: "",
+      pendingCharacters: [],
+      finalAnswer: null,
+      resolveAnimation: null,
       answer: "",
       error: "",
       waitingText: waiting.textContent,
@@ -894,25 +1076,30 @@
     updateComposerState();
     try {
       let streamCompleted = false;
-      await runMessageJobRequest(
-        `/v1/conversations/${targetConversationId}/message-jobs`,
+      await streamRequest(
+        `/v1/conversations/${targetConversationId}/messages/stream`,
         {
           message: messageText,
           attachments: serializeAttachments(attachments),
           request_id: requestId,
         },
-        (event) => {
+        async (event) => {
           const state = conversationStreams.get(targetConversationId);
           if (!state || state.requestId !== requestId) return;
           if (event.type === "delta") {
-            state.text += event.text || "";
-            renderConversationStream(targetConversationId);
+            enqueueConversationDelta(
+              targetConversationId,
+              requestId,
+              event.text || "",
+            );
           }
           if (event.type === "final") {
             streamCompleted = true;
-            state.status = "completed";
-            state.answer = event.answer || state.text;
-            renderConversationStream(targetConversationId);
+            await finishConversationStream(
+              targetConversationId,
+              requestId,
+              event.answer || state.receivedText,
+            );
           }
           if (event.type === "error") {
             throw new Error(event.error || "Agent stream failed");
@@ -921,14 +1108,18 @@
       );
       const state = conversationStreams.get(targetConversationId);
       if (!streamCompleted && state?.text) {
-        state.status = "completed";
-        state.answer = state.text;
-        renderConversationStream(targetConversationId);
+        await finishConversationStream(
+          targetConversationId,
+          requestId,
+          state.receivedText || state.text,
+        );
       }
       await refreshConversations();
     } catch (error) {
       const state = conversationStreams.get(targetConversationId);
       if (state?.requestId === requestId) {
+        cancelStreamAnimation(requestId);
+        state.pendingCharacters = [];
         state.status = "failed";
         state.error =
           error.status === 401 ? "登录已失效，请重新登录。" : `请求失败：${error.message}`;
@@ -1408,27 +1599,52 @@
     attachmentInput.value = "";
   });
 
+  chatInput.addEventListener("paste", (event) => {
+    const files = [...(event.clipboardData?.files ?? [])];
+    if (!files.length) return;
+    event.preventDefault();
+    void addFiles(files);
+  });
+
   document.addEventListener("click", (event) => {
     if (!attachmentMenu.hidden && !event.target.closest(".attach-wrap")) {
       attachmentMenu.hidden = true;
     }
   });
 
-  ["dragenter", "dragover"].forEach((type) => {
-    messages.addEventListener(type, (event) => {
-      event.preventDefault();
-      messages.classList.add("drag-over");
-    });
+  const hasDraggedFiles = (event) =>
+    [...(event.dataTransfer?.types ?? [])].includes("Files");
+  let dragDepth = 0;
+
+  chatWorkspace.addEventListener("dragenter", (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    dragDepth += 1;
+    messages.classList.add("drag-over");
   });
 
-  ["dragleave", "drop"].forEach((type) => {
-    messages.addEventListener(type, (event) => {
-      event.preventDefault();
-      if (type === "drop") {
-        void addFiles(event.dataTransfer?.files ?? []);
-      }
+  chatWorkspace.addEventListener("dragover", (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    messages.classList.add("drag-over");
+  });
+
+  chatWorkspace.addEventListener("dragleave", (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) {
       messages.classList.remove("drag-over");
-    });
+    }
+  });
+
+  chatWorkspace.addEventListener("drop", (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    dragDepth = 0;
+    messages.classList.remove("drag-over");
+    void addFiles(event.dataTransfer?.files ?? []);
   });
 
   scheduleTabs.forEach((button) => {

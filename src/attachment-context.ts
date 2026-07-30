@@ -10,7 +10,14 @@ export type AttachmentContextRecord = {
   size?: number;
   kind: "image" | "pdf" | "document" | "text_file" | "file";
   extractionStatus: AttachmentExtractionStatus;
-  parser: "pdf-parse" | "document-parser" | "client-text" | "model-vision" | "none";
+  parser:
+    | "pdf-parse"
+    | "pdf-text-and-page-renderer"
+    | "document-parser"
+    | "document-parser-and-embedded-images"
+    | "client-text"
+    | "model-vision"
+    | "none";
   extractedText?: string;
   format?: string;
   pageCount?: number;

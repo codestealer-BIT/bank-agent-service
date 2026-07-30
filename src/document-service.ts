@@ -1,9 +1,14 @@
 import path from "node:path";
+import { createCanvas, loadImage } from "@napi-rs/canvas";
 import JSZip from "jszip";
 import { extractPdfText } from "./pdf-service.js";
 
 const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
 const MAX_EXTRACTED_TEXT_CHARS = 60_000;
+const MAX_VISUAL_DOCUMENT_IMAGES = 4;
+const MAX_VISUAL_DOCUMENT_EDGE = 1_200;
+const MAX_VISUAL_DOCUMENT_TOTAL_BYTES = 4 * 1024 * 1024;
+const VISUAL_DOCUMENT_JPEG_QUALITY = 70;
 
 const TEXT_EXTENSIONS = new Set([
   ".txt", ".md", ".log", ".csv", ".tsv", ".json", ".jsonl",
@@ -29,6 +34,18 @@ export type ExtractedDocument = {
   truncated: boolean;
   hasExtractableText: boolean;
   details?: string;
+  visualImages?: VisualDocumentImage[];
+  visualImagesTruncated?: boolean;
+  visualDetails?: string;
+};
+
+export type VisualDocumentImage = {
+  name: string;
+  mediaType: "image/jpeg";
+  data: string;
+  size: number;
+  width: number;
+  height: number;
 };
 
 function decodeBase64(data: string): Buffer {
@@ -144,6 +161,73 @@ async function extractPptx(zip: JSZip): Promise<string> {
     }),
   );
   return normalizeText(slides.filter(Boolean).join("\n\n"));
+}
+
+async function extractPptxVisualImages(zip: JSZip): Promise<{
+  images: VisualDocumentImage[];
+  truncated: boolean;
+  details: string;
+}> {
+  const mediaNames = Object.keys(zip.files)
+    .filter((name) => /^ppt\/media\/image\d+\.(?:png|jpe?g|webp)$/i.test(name))
+    .sort((a, b) => naturalNumber(a) - naturalNumber(b));
+
+  const images: VisualDocumentImage[] = [];
+  let totalBytes = 0;
+  let skipped = 0;
+
+  for (const name of mediaNames) {
+    if (images.length >= MAX_VISUAL_DOCUMENT_IMAGES) {
+      skipped += 1;
+      continue;
+    }
+
+    const entry = zip.file(name);
+    if (!entry) continue;
+
+    try {
+      const source = await entry.async("nodebuffer");
+      const image = await loadImage(source);
+      const scale = Math.min(
+        1,
+        MAX_VISUAL_DOCUMENT_EDGE / Math.max(image.width, image.height),
+      );
+      const width = Math.max(1, Math.round(image.width * scale));
+      const height = Math.max(1, Math.round(image.height * scale));
+      const canvas = createCanvas(width, height);
+      const context = canvas.getContext("2d");
+      context.drawImage(image, 0, 0, width, height);
+      const encoded = await canvas.encode("jpeg", VISUAL_DOCUMENT_JPEG_QUALITY);
+
+      if (
+        images.length > 0 &&
+        totalBytes + encoded.length > MAX_VISUAL_DOCUMENT_TOTAL_BYTES
+      ) {
+        skipped += 1;
+        continue;
+      }
+
+      images.push({
+        name,
+        mediaType: "image/jpeg",
+        data: encoded.toString("base64"),
+        size: encoded.length,
+        width,
+        height,
+      });
+      totalBytes += encoded.length;
+    } catch {
+      skipped += 1;
+    }
+  }
+
+  return {
+    images,
+    truncated: skipped > 0 || mediaNames.length > images.length,
+    details: mediaNames.length
+      ? `Embedded images: ${images.length}/${mediaNames.length} included for visual analysis`
+      : "No supported embedded PPTX images found",
+  };
 }
 
 function cellValue(cellXml: string, sharedStrings: string[]): string {
@@ -268,5 +352,16 @@ export async function extractDocumentText(input: {
   else if ([".odt", ".ods", ".odp"].includes(extension)) text = await extractOpenDocument(zip);
   else if (extension === ".epub") text = await extractEpub(zip);
 
-  return finalize(text, extension.slice(1).toUpperCase());
+  const extracted = finalize(text, extension.slice(1).toUpperCase());
+  if (extension === ".pptx" && !extracted.hasExtractableText) {
+    const visual = await extractPptxVisualImages(zip);
+    return {
+      ...extracted,
+      visualImages: visual.images,
+      visualImagesTruncated: visual.truncated,
+      visualDetails: visual.details,
+    };
+  }
+
+  return extracted;
 }

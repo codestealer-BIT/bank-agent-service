@@ -1,0 +1,7 @@
+{"run":1,"conversationId":"0a9fa9b9-0f18-442d-8baa-1b2d047765ac","headersMs":364,"firstVisibleMs":31440,"totalMs":46173,"backendDurationMs":42301,"deltaChars":1156,"answerChars":1118}
+{"run":2,"conversationId":"6cec56ad-77b3-4a78-8c4e-cd107bc5ec2f","headersMs":492,"firstVisibleMs":21264,"totalMs":30714,"backendDurationMs":28228,"deltaChars":935,"answerChars":935}
+{"run":3,"conversationId":"1479c05b-055d-4caa-b5f0-95cd8e7f604c","headersMs":545,"firstVisibleMs":24318,"totalMs":37265,"backendDurationMs":34868,"deltaChars":1137,"answerChars":1137}
+{"run":4,"conversationId":"1deaf147-2619-4f7b-b0db-20c92166873f","headersMs":506,"firstVisibleMs":25360,"totalMs":30374,"backendDurationMs":28053,"deltaChars":944,"answerChars":944}
+{"run":5,"conversationId":"a621f3e8-fbbb-4c4f-9ff1-996e688217df","headersMs":456,"firstVisibleMs":47763,"totalMs":69079,"backendDurationMs":66683,"deltaChars":922,"answerChars":653}
+{"run":6,"conversationId":"c6b47c93-0635-48c9-93f5-2fd3e9fc6351","headersMs":321,"firstVisibleMs":22239,"totalMs":35035,"backendDurationMs":32718,"deltaChars":1022,"answerChars":969}
+{"summary":{"runs":6,"fileBytes":17072547,"headersMs":{"min":321,"avg":447,"max":545},"firstVisibleMs":{"min":21264,"avg":28731,"max":47763},"totalMs":{"min":30374,"avg":41440,"max":69079},"backendDurationMs":{"min":28053,"avg":38809,"max":66683}}}
