@@ -5,16 +5,23 @@ import {
   type BootstrapStateResult,
   type LettaCodeClientSessionOptions,
   type LettaCodeSession,
-  type RecoverPendingApprovalsOptions,
-  type RecoverPendingApprovalsResult,
-  type RunTurnOptions,
   type SDKMessage,
+  type SDKProtocolCommand,
+  type SDKProtocolMessage,
   type SDKResultMessage,
   type MessageContentItem,
   type SendMessage,
 } from "@letta-ai/letta-agent-sdk";
+import { stat, unlink } from "node:fs/promises";
+import { join } from "node:path";
 import { config } from "./config.js";
+import {
+  contextNeedsCompaction,
+  estimatePendingMessageBytes,
+  measureConversationContextBytes,
+} from "./conversation-compaction.js";
 import { createOperationsTools } from "./agent-tools.js";
+import { BANK_OPERATIONS_MEMORY_SCOPE_POLICY } from "./memory-policy.js";
 import { pool } from "./database.js";
 import {
   formatMemoryContext,
@@ -31,16 +38,15 @@ import {
   withDistributedLock,
   withGlobalTurnSlot,
 } from "./redis-leases.js";
-import {
-  APPROVAL_RECOVERY_TIMEOUT_MS,
-  ApprovalConflictError,
-  MAX_APPROVAL_RECOVERY_ATTEMPTS,
-  resolveHeadlessToolApproval,
-} from "./letta-session-policy.js";
 import { preparePdfForModel } from "./pdf-service.js";
 import { extractDocumentText } from "./document-service.js";
 import { userFacingAnswer } from "./response-policy.js";
 import type { AttachmentContextRecord } from "./attachment-context.js";
+import {
+  ModelFailoverSuppressedError,
+  runWithModelFailover,
+  type ModelAttemptContext,
+} from "./model-failover.js";
 
 const client = new LettaAgentClient({
   backend: "local",
@@ -55,15 +61,168 @@ const client = new LettaAgentClient({
 // LettaCodeSession interface does not yet declare them.
 type RecoverableTurnSession = LettaCodeSession & {
   bootstrapState(options?: BootstrapStateOptions): Promise<BootstrapStateResult>;
-  recoverPendingApprovals(
-    options?: RecoverPendingApprovalsOptions,
-  ): Promise<RecoverPendingApprovalsResult>;
-  runTurn(
-    message: SendMessage,
-    options?: RunTurnOptions,
-  ): Promise<SDKResultMessage>;
+  runTurn(message: SendMessage): Promise<SDKResultMessage>;
   updateToolset(toolsetPreference: string): Promise<void>;
 };
+
+type ConversationCompactResponse = SDKProtocolMessage<"conversation_compact_response"> & {
+  success?: boolean;
+  error?: string | null;
+  compaction?: {
+    num_messages_before?: number;
+    num_messages_after?: number;
+    summary?: string;
+  } | null;
+};
+
+const GIT_CONFIG_LOCK_RETRY_ATTEMPTS = 5;
+const GIT_CONFIG_LOCK_RETRY_BASE_MS = 150;
+const STALE_GIT_CONFIG_LOCK_MS = 30_000;
+
+function isGitConfigLockError(error: unknown): boolean {
+  const text =
+    error instanceof Error
+      ? `${error.message}\n${error.stack ?? ""}`
+      : String(error);
+  return (
+    text.includes(".git/config.lock") ||
+    text.includes("config.lock") ||
+    text.includes("File exists") ||
+    text.includes("EEXIST")
+  );
+}
+
+function gitConfigLockPath(agentId: string): string {
+  return join(
+    config.LETTA_LOCAL_BACKEND_DIR,
+    "memfs",
+    agentId,
+    "memory",
+    ".git",
+    "config.lock",
+  );
+}
+
+async function removeStaleGitConfigLock(agentId: string): Promise<void> {
+  const lockPath = gitConfigLockPath(agentId);
+  try {
+    const lockStat = await stat(lockPath);
+    if (Date.now() - lockStat.mtimeMs < STALE_GIT_CONFIG_LOCK_MS) return;
+    await unlink(lockPath);
+    console.warn("[agent-local-backend] removed stale git config lock", {
+      agentId,
+      lockPath,
+    });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      console.warn("[agent-local-backend] could not inspect git config lock", {
+        agentId,
+        lockPath,
+        error,
+      });
+    }
+  }
+}
+
+async function withGitConfigLockRetry<T>(
+  agentId: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= GIT_CONFIG_LOCK_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await work();
+    } catch (error) {
+      if (!isGitConfigLockError(error)) throw error;
+      lastError = error;
+      await removeStaleGitConfigLock(agentId);
+      const backoffMs =
+        GIT_CONFIG_LOCK_RETRY_BASE_MS * attempt +
+        Math.floor(Math.random() * GIT_CONFIG_LOCK_RETRY_BASE_MS);
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    }
+  }
+  throw lastError;
+}
+
+async function prepareLocalSession(
+  agentId: string,
+  session: RecoverableTurnSession,
+): Promise<BootstrapStateResult> {
+  return withGitConfigLockRetry(agentId, async () => {
+    const state = await session.bootstrapState({ limit: 1 });
+    // The local App Server does not support per-session allowedTools yet.
+    // Disabling the built-in harness toolset leaves only the SDK-registered
+    // infrastructure tools available for this session.
+    await session.updateToolset("none");
+    return state;
+  });
+}
+
+async function compactConversationBeforeTurn(
+  session: RecoverableTurnSession,
+  conversationId: string | null,
+  pendingMessageBytes = 0,
+): Promise<void> {
+  if (!conversationId || config.LETTA_COMPACTION_THRESHOLD_BYTES === 0) return;
+
+  const before = await measureConversationContextBytes(
+    config.LETTA_LOCAL_BACKEND_DIR,
+    conversationId,
+  );
+  if (
+    !contextNeedsCompaction(
+      before,
+      config.LETTA_COMPACTION_THRESHOLD_BYTES,
+      pendingMessageBytes,
+    )
+  ) {
+    return;
+  }
+
+  const command = {
+    type: "conversation_compact",
+    conversation_id: conversationId,
+    body: {
+      compaction_settings: {
+        mode: "all",
+        clip_chars: 12_000,
+      },
+    },
+  } as SDKProtocolCommand;
+  const response = (await session.sendCommand(command, {
+    responseType: "conversation_compact_response",
+    timeoutMs: config.LETTA_REQUEST_TIMEOUT_MS,
+  })) as ConversationCompactResponse;
+
+  if (response.success !== true || !response.compaction) {
+    throw new Error(
+      `Conversation history compaction failed: ${response.error ?? "unknown error"}`,
+    );
+  }
+
+  const after = await measureConversationContextBytes(
+    config.LETTA_LOCAL_BACKEND_DIR,
+    conversationId,
+  );
+  if (after.totalBytes >= before.totalBytes) {
+    throw new Error(
+      `Conversation history compaction did not reduce context bytes (${before.totalBytes} -> ${after.totalBytes}).`,
+    );
+  }
+  console.info("[conversation-compaction] compacted local conversation", {
+    conversationId,
+    beforeBytes: before.totalBytes,
+    pendingMessageBytes,
+    projectedBytes: before.totalBytes + pendingMessageBytes,
+    afterBytes: after.totalBytes,
+    messagesBefore:
+      response.compaction.num_messages_before ?? before.inContextMessageCount,
+    messagesAfter:
+      response.compaction.num_messages_after ?? after.inContextMessageCount,
+  });
+}
 
 type AttachmentPreparationDiagnostics = {
   inputCount: number;
@@ -85,7 +244,22 @@ type AttachmentPreparationDiagnostics = {
   }>;
 };
 
-function getSessionModelOptions(): Pick<
+function qualifyAgentModel(model: string): string {
+  if (model.includes("/")) return model;
+  const providerSeparator = config.AGENT_MODEL.indexOf("/");
+  return providerSeparator < 0
+    ? model
+    : `${config.AGENT_MODEL.slice(0, providerSeparator)}/${model}`;
+}
+
+const agentModels = Array.from(
+  new Set([
+    config.AGENT_MODEL,
+    ...config.AGENT_FALLBACK_MODELS.map(qualifyAgentModel),
+  ]),
+);
+
+function getSessionModelOptions(model: string): Pick<
   LettaCodeClientSessionOptions,
   "model" | "reasoningEffort"
 > {
@@ -94,14 +268,45 @@ function getSessionModelOptions(): Pick<
   // that catalog, so passing reasoningEffort makes the SDK fail before the
   // turn reaches LiteLLM. Keep the model explicit, but only pass the reasoning
   // tier for catalog-backed model handles.
-  if (config.AGENT_MODEL.startsWith("lmstudio/")) {
-    return { model: config.AGENT_MODEL };
+  if (model.startsWith("lmstudio/")) {
+    return { model };
   }
 
   return {
-    model: config.AGENT_MODEL,
+    model,
     reasoningEffort: config.AGENT_REASONING_EFFORT,
   };
+}
+
+function conciseError(error: unknown): string {
+  if (error instanceof Error) return error.message.slice(0, 500);
+  return String(error).slice(0, 500);
+}
+
+async function withAgentModelFailover<T>(
+  operation: string,
+  work: (context: ModelAttemptContext) => Promise<T>,
+) {
+  return runWithModelFailover(
+    {
+      models: agentModels,
+      primaryAttempts: config.AGENT_PRIMARY_ATTEMPTS,
+      fallbackAttempts: config.AGENT_FALLBACK_ATTEMPTS,
+      backoffBaseMs: config.AGENT_FAILOVER_BACKOFF_BASE_MS,
+      backoffMaxMs: config.AGENT_FAILOVER_BACKOFF_MAX_MS,
+      onFailure: ({ model, attempt, nextModel, delayMs, error }) => {
+        console.warn("[model-failover] retrying model operation", {
+          operation,
+          failedModel: model,
+          attempt,
+          nextModel,
+          delayMs,
+          error: conciseError(error),
+        });
+      },
+    },
+    work,
+  );
 }
 
 function stripHiddenReasoning(value: string): string {
@@ -117,15 +322,6 @@ function visibleStreamingText(value: string): string {
 }
 
 function resultError(result: SDKResultMessage): Error {
-  if (
-    result.approvalConflict === true ||
-    result.errorCode === "approval_conflict" ||
-    result.errorCode === "approval_conflict_terminal"
-  ) {
-    return new ApprovalConflictError(
-      result.errorDetail ?? result.error ?? result.stopReason,
-    );
-  }
   return new Error(
     result.errorDetail ??
       result.error ??
@@ -221,7 +417,7 @@ async function buildRuntimeMessage(input: {
       await searchMemory({
         agentId: input.agentId,
         query: input.message,
-        limit: 5,
+        limit: 12,
       }),
     );
   } catch (error) {
@@ -271,6 +467,7 @@ export async function runConversationTurn(input: {
   message: string;
   attachments?: TurnAttachment[];
   emailRecipient?: string | null;
+  includeEmailTool?: boolean;
 }): Promise<{
   answer: string;
   lettaConversationId: string;
@@ -280,88 +477,87 @@ export async function runConversationTurn(input: {
   // The route serializes each conversation. Different conversations may run
   // concurrently; shared-memory writes are serialized by the memory service.
   return withGlobalTurnSlot(async () => {
-    const sessionOptions: LettaCodeClientSessionOptions = {
-      ...getSessionModelOptions(),
-      permissionMode: "unrestricted",
-      skillSources: [],
-      cwd: "/workspace",
-      canUseTool: (toolName: string) =>
-        resolveHeadlessToolApproval(toolName),
-      maxApprovalRecoveryAttempts: MAX_APPROVAL_RECOVERY_ATTEMPTS,
-      approvalRecoveryTimeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
-      tools: createOperationsTools(input.userId, input.agentId, {
-        emailRecipient: input.emailRecipient,
-      }),
-    };
-    const session = (input.lettaConversationId
-      ? client.resumeSession(input.lettaConversationId, sessionOptions)
-      : client.createSession(
-          input.agentId,
-          sessionOptions,
-        )) as RecoverableTurnSession;
-
-    try {
-      // Pending approvals are persistent conversation state. Recover them
-      // before sending so the user's message is not submitted twice by a
-      // conflict-then-retry cycle.
-      const state = await session.bootstrapState({ limit: 1 });
-      // The local App Server does not support per-session allowedTools yet.
-      // Disabling the built-in harness toolset leaves only the SDK-registered
-      // infrastructure tools available for this session.
-      await session.updateToolset("none");
-      if (state.hasPendingApproval === true) {
-        const recovery = await session.recoverPendingApprovals({
-          timeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
-        });
-        if (!recovery.recovered) {
-          throw new ApprovalConflictError(recovery.detail);
-        }
-      }
-
-      const preparedMessage = await buildRuntimeMessage(input);
-
-      const modelStartedAt = performance.now();
-      const result = await session.runTurn(preparedMessage.message, {
-        maxApprovalRecoveryAttempts: MAX_APPROVAL_RECOVERY_ATTEMPTS,
-        recoveryTimeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
-      });
-      const modelMs = Math.round(performance.now() - modelStartedAt);
-      if ((input.attachments ?? []).length > 0) {
-        console.info(
-          "[turn-diagnostics]",
-          JSON.stringify({
-            userId: input.userId,
-            agentId: input.agentId,
-            mode: "non_stream",
-            attachmentPrepMs: preparedMessage.diagnostics.attachmentPrep.prepMs,
-            memoryRetrievalMs: preparedMessage.diagnostics.memoryRetrievalMs,
-            modelMs,
-            visualCount:
-              preparedMessage.diagnostics.attachmentPrep.visualCount,
-            visualBytes:
-              preparedMessage.diagnostics.attachmentPrep.visualBytes,
+    const preparedMessage = await buildRuntimeMessage(input);
+    const failover = await withAgentModelFailover(
+      "conversation_turn",
+      async ({ model }) => {
+        let sideEffectTool: string | null = null;
+        const sessionOptions: LettaCodeClientSessionOptions = {
+          ...getSessionModelOptions(model),
+          permissionMode: "unrestricted",
+          skillSources: [],
+          cwd: "/workspace",
+          tools: createOperationsTools(input.userId, input.agentId, {
+            emailRecipient: input.emailRecipient,
+            includeEmail: input.includeEmailTool,
+            onSideEffect: (toolName) => {
+              sideEffectTool = toolName;
+            },
           }),
-        );
-      }
-      if (!result.success) {
-        throw resultError(result);
-      }
-      const conversationId = result.conversationId ?? session.conversationId;
-      if (!conversationId) {
-        throw new Error("Letta did not return a conversation id");
-      }
-      return {
-        answer: userFacingAnswer(
-          stripHiddenReasoning(result.result ?? ""),
-          input.message,
-        ),
-        lettaConversationId: conversationId,
-        durationMs: result.durationMs,
-        attachmentContext: preparedMessage.attachmentContext,
-      };
-    } finally {
-      session.close();
+        };
+        const session = (input.lettaConversationId
+          ? client.resumeSession(input.lettaConversationId, sessionOptions)
+          : client.createSession(input.agentId, sessionOptions)) as RecoverableTurnSession;
+
+        try {
+          await prepareLocalSession(input.agentId, session);
+          await compactConversationBeforeTurn(
+            session,
+            input.lettaConversationId,
+            estimatePendingMessageBytes(preparedMessage.message),
+          );
+
+          const modelStartedAt = performance.now();
+          const result = await session.runTurn(preparedMessage.message);
+          const modelMs = Math.round(performance.now() - modelStartedAt);
+          if (!result.success) throw resultError(result);
+
+          const conversationId = result.conversationId ?? session.conversationId;
+          if (!conversationId) {
+            throw new Error("Letta did not return a conversation id");
+          }
+          return { result, conversationId, modelMs };
+        } catch (error) {
+          if (sideEffectTool) {
+            throw new ModelFailoverSuppressedError(
+              `The model failed after the ${sideEffectTool} side effect completed`,
+              error,
+            );
+          }
+          throw error;
+        } finally {
+          session.close();
+        }
+      },
+    );
+
+    const { result, conversationId, modelMs } = failover.value;
+    if ((input.attachments ?? []).length > 0) {
+      console.info(
+        "[turn-diagnostics]",
+        JSON.stringify({
+          userId: input.userId,
+          agentId: input.agentId,
+          mode: "non_stream",
+          model: failover.model,
+          modelAttempts: failover.totalAttempts,
+          attachmentPrepMs: preparedMessage.diagnostics.attachmentPrep.prepMs,
+          memoryRetrievalMs: preparedMessage.diagnostics.memoryRetrievalMs,
+          modelMs,
+          visualCount: preparedMessage.diagnostics.attachmentPrep.visualCount,
+          visualBytes: preparedMessage.diagnostics.attachmentPrep.visualBytes,
+        }),
+      );
     }
+    return {
+      answer: userFacingAnswer(
+        stripHiddenReasoning(result.result ?? ""),
+        input.message,
+      ),
+      lettaConversationId: conversationId,
+      durationMs: result.durationMs,
+      attachmentContext: preparedMessage.attachmentContext,
+    };
   });
 }
 
@@ -373,6 +569,7 @@ export async function streamConversationTurn(
     message: string;
     attachments?: TurnAttachment[];
     emailRecipient?: string | null;
+    includeEmailTool?: boolean;
   },
   onDelta: (delta: string) => void | Promise<void>,
 ): Promise<{
@@ -382,213 +579,238 @@ export async function streamConversationTurn(
   attachmentContext: AttachmentContextRecord[];
 }> {
   return withGlobalTurnSlot(async () => {
-    const sessionOptions: LettaCodeClientSessionOptions = {
-      ...getSessionModelOptions(),
-      permissionMode: "unrestricted",
-      skillSources: [],
-      cwd: "/workspace",
-      canUseTool: (toolName: string) =>
-        resolveHeadlessToolApproval(toolName),
-      maxApprovalRecoveryAttempts: MAX_APPROVAL_RECOVERY_ATTEMPTS,
-      approvalRecoveryTimeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
-      tools: createOperationsTools(input.userId, input.agentId, {
-        emailRecipient: input.emailRecipient,
-      }),
-    };
-    const session = (input.lettaConversationId
-      ? client.resumeSession(input.lettaConversationId, sessionOptions)
-      : client.createSession(
-          input.agentId,
-          sessionOptions,
-        )) as RecoverableTurnSession;
-
-    try {
-      const state = await session.bootstrapState({ limit: 1 });
-      await session.updateToolset("none");
-      if (state.hasPendingApproval === true) {
-        const recovery = await session.recoverPendingApprovals({
-          timeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
-        });
-        if (!recovery.recovered) {
-          throw new ApprovalConflictError(recovery.detail);
-        }
-      }
-
-      const preparedMessage = await buildRuntimeMessage(input);
-      const startedAt = performance.now();
-      if ((input.attachments ?? []).length > 0) {
-        console.info(
-          "[turn-diagnostics]",
-          JSON.stringify({
-            userId: input.userId,
-            agentId: input.agentId,
-            mode: "stream_started",
-            attachmentPrepMs: preparedMessage.diagnostics.attachmentPrep.prepMs,
-            memoryRetrievalMs: preparedMessage.diagnostics.memoryRetrievalMs,
-            visualCount:
-              preparedMessage.diagnostics.attachmentPrep.visualCount,
-            visualBytes:
-              preparedMessage.diagnostics.attachmentPrep.visualBytes,
+    const preparedMessage = await buildRuntimeMessage(input);
+    const failover = await withAgentModelFailover(
+      "stream_conversation_turn",
+      async ({ model, attempt }) => {
+        let sideEffectTool: string | null = null;
+        const sessionOptions: LettaCodeClientSessionOptions = {
+          ...getSessionModelOptions(model),
+          permissionMode: "unrestricted",
+          skillSources: [],
+          cwd: "/workspace",
+          tools: createOperationsTools(input.userId, input.agentId, {
+            emailRecipient: input.emailRecipient,
+            includeEmail: input.includeEmailTool,
+            onSideEffect: (toolName) => {
+              sideEffectTool = toolName;
+            },
           }),
-        );
-      }
-      const sendStartedAt = performance.now();
-      await session.send(preparedMessage.message);
-      const sendMs = Math.round(performance.now() - sendStartedAt);
+        };
+        const session = (input.lettaConversationId
+          ? client.resumeSession(input.lettaConversationId, sessionOptions)
+          : client.createSession(input.agentId, sessionOptions)) as RecoverableTurnSession;
+        let emittedVisibleText = "";
 
-      let finalResult: SDKResultMessage | null = null;
-      let rawAssistantText = "";
-      let emittedVisibleText = "";
-      let firstSdkEventAt: number | null = null;
-      let firstAssistantTextAt: number | null = null;
-      let firstVisibleTextAt: number | null = null;
+        try {
+          await prepareLocalSession(input.agentId, session);
+          await compactConversationBeforeTurn(
+            session,
+            input.lettaConversationId,
+            estimatePendingMessageBytes(preparedMessage.message),
+          );
+          const startedAt = performance.now();
+          if ((input.attachments ?? []).length > 0) {
+            console.info(
+              "[turn-diagnostics]",
+              JSON.stringify({
+                userId: input.userId,
+                agentId: input.agentId,
+                mode: "stream_started",
+                model,
+                modelAttempt: attempt,
+                attachmentPrepMs: preparedMessage.diagnostics.attachmentPrep.prepMs,
+                memoryRetrievalMs: preparedMessage.diagnostics.memoryRetrievalMs,
+                visualCount: preparedMessage.diagnostics.attachmentPrep.visualCount,
+                visualBytes: preparedMessage.diagnostics.attachmentPrep.visualBytes,
+              }),
+            );
+          }
+          const sendStartedAt = performance.now();
+          await session.send(preparedMessage.message);
+          const sendMs = Math.round(performance.now() - sendStartedAt);
 
-      const logFirstTokenDiagnostic = (mode: string, extra: Record<string, unknown> = {}) => {
-        if ((input.attachments ?? []).length === 0) {
-          return;
-        }
-        console.info(
-          "[turn-diagnostics]",
-          JSON.stringify({
-            userId: input.userId,
-            agentId: input.agentId,
-            mode,
-            sendMs,
-            elapsedMs: Math.round(performance.now() - startedAt),
-            attachmentPrepMs: preparedMessage.diagnostics.attachmentPrep.prepMs,
-            memoryRetrievalMs: preparedMessage.diagnostics.memoryRetrievalMs,
-            visualCount:
-              preparedMessage.diagnostics.attachmentPrep.visualCount,
-            visualBytes:
-              preparedMessage.diagnostics.attachmentPrep.visualBytes,
-            ...extra,
-          }),
-        );
-      };
+          let finalResult: SDKResultMessage | null = null;
+          let rawAssistantText = "";
+          let firstSdkEventAt: number | null = null;
+          let firstAssistantTextAt: number | null = null;
+          let firstVisibleTextAt: number | null = null;
 
-      for await (const sdkMessage of session.stream() as AsyncGenerator<SDKMessage>) {
-        if (!firstSdkEventAt) {
-          firstSdkEventAt = performance.now();
-          logFirstTokenDiagnostic("stream_first_sdk_event", {
-            sdkType: sdkMessage.type,
-            firstSdkEventMs: Math.round(firstSdkEventAt - startedAt),
-          });
-        }
-        if (sdkMessage.type === "stream_event") {
-          const delta = extractStreamTextDelta(sdkMessage.event);
-          if (delta?.kind === "assistant" && delta.text) {
-            if (!firstAssistantTextAt) {
-              firstAssistantTextAt = performance.now();
-              logFirstTokenDiagnostic("stream_first_assistant_text", {
-                firstAssistantTextMs: Math.round(firstAssistantTextAt - startedAt),
-                firstAssistantTextChars: delta.text.length,
+          const logFirstTokenDiagnostic = (
+            mode: string,
+            extra: Record<string, unknown> = {},
+          ) => {
+            if ((input.attachments ?? []).length === 0) return;
+            console.info(
+              "[turn-diagnostics]",
+              JSON.stringify({
+                userId: input.userId,
+                agentId: input.agentId,
+                mode,
+                model,
+                modelAttempt: attempt,
+                sendMs,
+                elapsedMs: Math.round(performance.now() - startedAt),
+                attachmentPrepMs: preparedMessage.diagnostics.attachmentPrep.prepMs,
+                memoryRetrievalMs: preparedMessage.diagnostics.memoryRetrievalMs,
+                visualCount: preparedMessage.diagnostics.attachmentPrep.visualCount,
+                visualBytes: preparedMessage.diagnostics.attachmentPrep.visualBytes,
+                ...extra,
+              }),
+            );
+          };
+
+          for await (const sdkMessage of session.stream() as AsyncGenerator<SDKMessage>) {
+            if (!firstSdkEventAt) {
+              firstSdkEventAt = performance.now();
+              logFirstTokenDiagnostic("stream_first_sdk_event", {
+                sdkType: sdkMessage.type,
+                firstSdkEventMs: Math.round(firstSdkEventAt - startedAt),
               });
             }
-            rawAssistantText += delta.text;
-            const nextVisibleText = visibleStreamingText(rawAssistantText);
-            const visibleDelta = nextVisibleText.slice(emittedVisibleText.length);
-            if (visibleDelta) {
-              if (!firstVisibleTextAt) {
-                firstVisibleTextAt = performance.now();
-                logFirstTokenDiagnostic("stream_first_visible_text", {
-                  firstVisibleTextMs: Math.round(firstVisibleTextAt - startedAt),
-                  firstVisibleTextChars: visibleDelta.length,
+            if (sdkMessage.type === "stream_event") {
+              const delta = extractStreamTextDelta(sdkMessage.event);
+              if (delta?.kind === "assistant" && delta.text) {
+                if (!firstAssistantTextAt) {
+                  firstAssistantTextAt = performance.now();
+                  logFirstTokenDiagnostic("stream_first_assistant_text", {
+                    firstAssistantTextMs: Math.round(firstAssistantTextAt - startedAt),
+                    firstAssistantTextChars: delta.text.length,
+                  });
+                }
+                rawAssistantText += delta.text;
+                const nextVisibleText = visibleStreamingText(rawAssistantText);
+                const visibleDelta = nextVisibleText.slice(emittedVisibleText.length);
+                if (visibleDelta) {
+                  if (!firstVisibleTextAt) {
+                    firstVisibleTextAt = performance.now();
+                    logFirstTokenDiagnostic("stream_first_visible_text", {
+                      firstVisibleTextMs: Math.round(firstVisibleTextAt - startedAt),
+                      firstVisibleTextChars: visibleDelta.length,
+                    });
+                  }
+                  emittedVisibleText = nextVisibleText;
+                  await onDelta(visibleDelta);
+                }
+              }
+              continue;
+            }
+            if (sdkMessage.type === "assistant" && sdkMessage.content) {
+              if (!firstAssistantTextAt) {
+                firstAssistantTextAt = performance.now();
+                logFirstTokenDiagnostic("stream_first_assistant_text", {
+                  firstAssistantTextMs: Math.round(firstAssistantTextAt - startedAt),
+                  firstAssistantTextChars: sdkMessage.content.length,
+                  sdkType: sdkMessage.type,
                 });
               }
-              emittedVisibleText = nextVisibleText;
-              await onDelta(visibleDelta);
+              rawAssistantText += sdkMessage.content;
+              const nextVisibleText = visibleStreamingText(rawAssistantText);
+              const visibleDelta = nextVisibleText.slice(emittedVisibleText.length);
+              if (visibleDelta) {
+                if (!firstVisibleTextAt) {
+                  firstVisibleTextAt = performance.now();
+                  logFirstTokenDiagnostic("stream_first_visible_text", {
+                    firstVisibleTextMs: Math.round(firstVisibleTextAt - startedAt),
+                    firstVisibleTextChars: visibleDelta.length,
+                    sdkType: sdkMessage.type,
+                  });
+                }
+                emittedVisibleText = nextVisibleText;
+                await onDelta(visibleDelta);
+              }
+              continue;
+            }
+            if (sdkMessage.type === "result") {
+              finalResult = sdkMessage;
+              break;
+            }
+            if (sdkMessage.type === "error") {
+              throw new Error(
+                sdkMessage.errorDetail ?? sdkMessage.message ?? sdkMessage.stopReason,
+              );
             }
           }
-          continue;
-        }
-        if (sdkMessage.type === "assistant" && sdkMessage.content) {
-          if (!firstAssistantTextAt) {
-            firstAssistantTextAt = performance.now();
-            logFirstTokenDiagnostic("stream_first_assistant_text", {
-              firstAssistantTextMs: Math.round(firstAssistantTextAt - startedAt),
-              firstAssistantTextChars: sdkMessage.content.length,
-              sdkType: sdkMessage.type,
-            });
-          }
-          rawAssistantText += sdkMessage.content;
-          const nextVisibleText = visibleStreamingText(rawAssistantText);
-          const visibleDelta = nextVisibleText.slice(emittedVisibleText.length);
-          if (visibleDelta) {
-            if (!firstVisibleTextAt) {
-              firstVisibleTextAt = performance.now();
-              logFirstTokenDiagnostic("stream_first_visible_text", {
-                firstVisibleTextMs: Math.round(firstVisibleTextAt - startedAt),
-                firstVisibleTextChars: visibleDelta.length,
-                sdkType: sdkMessage.type,
-              });
-            }
-            emittedVisibleText = nextVisibleText;
-            await onDelta(visibleDelta);
-          }
-          continue;
-        }
-        if (sdkMessage.type === "result") {
-          finalResult = sdkMessage;
-          break;
-        }
-        if (sdkMessage.type === "error") {
-          throw new Error(
-            sdkMessage.errorDetail ?? sdkMessage.message ?? sdkMessage.stopReason,
-          );
-        }
-      }
 
-      if (!finalResult) {
-        throw new Error("Agent stream ended without a final result");
-      }
-      if (!finalResult.success) {
-        throw resultError(finalResult);
-      }
-      if ((input.attachments ?? []).length > 0) {
-        console.info(
-          "[turn-diagnostics]",
-          JSON.stringify({
-            userId: input.userId,
-            agentId: input.agentId,
-            mode: "stream_finished",
-            attachmentPrepMs: preparedMessage.diagnostics.attachmentPrep.prepMs,
-            memoryRetrievalMs: preparedMessage.diagnostics.memoryRetrievalMs,
-            modelMs: Math.round(performance.now() - startedAt),
+          if (!finalResult) throw new Error("Agent stream ended without a final result");
+          if (!finalResult.success) throw resultError(finalResult);
+
+          const conversationId = finalResult.conversationId ?? session.conversationId;
+          if (!conversationId) {
+            throw new Error("Letta did not return a conversation id");
+          }
+          return {
+            finalResult,
+            rawAssistantText,
+            conversationId,
+            startedAt,
             sendMs,
-            firstSdkEventMs: firstSdkEventAt
-              ? Math.round(firstSdkEventAt - startedAt)
-              : null,
-            firstAssistantTextMs: firstAssistantTextAt
-              ? Math.round(firstAssistantTextAt - startedAt)
-              : null,
-            firstVisibleTextMs: firstVisibleTextAt
-              ? Math.round(firstVisibleTextAt - startedAt)
-              : null,
-            visualCount:
-              preparedMessage.diagnostics.attachmentPrep.visualCount,
-            visualBytes:
-              preparedMessage.diagnostics.attachmentPrep.visualBytes,
-          }),
-        );
-      }
+            firstSdkEventAt,
+            firstAssistantTextAt,
+            firstVisibleTextAt,
+          };
+        } catch (error) {
+          if (emittedVisibleText || sideEffectTool) {
+            throw new ModelFailoverSuppressedError(
+              emittedVisibleText
+                ? "The streaming model failed after response text was emitted"
+                : `The streaming model failed after the ${sideEffectTool} side effect completed`,
+              error,
+            );
+          }
+          throw error;
+        } finally {
+          session.close();
+        }
+      },
+    );
 
-      const conversationId = finalResult.conversationId ?? session.conversationId;
-      if (!conversationId) {
-        throw new Error("Letta did not return a conversation id");
-      }
-
-      return {
-        answer: userFacingAnswer(
-          stripHiddenReasoning(finalResult.result ?? rawAssistantText),
-          input.message,
-        ),
-        lettaConversationId: conversationId,
-        durationMs: finalResult.durationMs ?? Math.round(performance.now() - startedAt),
-        attachmentContext: preparedMessage.attachmentContext,
-      };
-    } finally {
-      session.close();
+    const {
+      finalResult,
+      rawAssistantText,
+      conversationId,
+      startedAt,
+      sendMs,
+      firstSdkEventAt,
+      firstAssistantTextAt,
+      firstVisibleTextAt,
+    } = failover.value;
+    if ((input.attachments ?? []).length > 0) {
+      console.info(
+        "[turn-diagnostics]",
+        JSON.stringify({
+          userId: input.userId,
+          agentId: input.agentId,
+          mode: "stream_finished",
+          model: failover.model,
+          modelAttempts: failover.totalAttempts,
+          attachmentPrepMs: preparedMessage.diagnostics.attachmentPrep.prepMs,
+          memoryRetrievalMs: preparedMessage.diagnostics.memoryRetrievalMs,
+          modelMs: Math.round(performance.now() - startedAt),
+          sendMs,
+          firstSdkEventMs: firstSdkEventAt
+            ? Math.round(firstSdkEventAt - startedAt)
+            : null,
+          firstAssistantTextMs: firstAssistantTextAt
+            ? Math.round(firstAssistantTextAt - startedAt)
+            : null,
+          firstVisibleTextMs: firstVisibleTextAt
+            ? Math.round(firstVisibleTextAt - startedAt)
+            : null,
+          visualCount: preparedMessage.diagnostics.attachmentPrep.visualCount,
+          visualBytes: preparedMessage.diagnostics.attachmentPrep.visualBytes,
+        }),
+      );
     }
+    return {
+      answer: userFacingAnswer(
+        stripHiddenReasoning(finalResult.result ?? rawAssistantText),
+        input.message,
+      ),
+      lettaConversationId: conversationId,
+      durationMs: finalResult.durationMs ?? Math.round(performance.now() - startedAt),
+      attachmentContext: preparedMessage.attachmentContext,
+    };
   });
 }
 
@@ -922,64 +1144,67 @@ export async function runMemoryReflection(input: {
   transcript: string;
 }): Promise<{ summary: string; lettaConversationId: string; durationMs: number }> {
   return withGlobalTurnSlot(async () => {
-    const sessionOptions: LettaCodeClientSessionOptions = {
-      ...getSessionModelOptions(),
-      permissionMode: "unrestricted",
-      skillSources: [],
-      cwd: "/workspace",
-      canUseTool: (toolName: string) =>
-        resolveHeadlessToolApproval(toolName),
-      maxApprovalRecoveryAttempts: MAX_APPROVAL_RECOVERY_ATTEMPTS,
-      approvalRecoveryTimeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
-      tools: createOperationsTools(input.userId, input.agentId),
-    };
-    const session = client.createSession(
-      input.agentId,
-      sessionOptions,
-    ) as RecoverableTurnSession;
+    const reflectionMessage = [
+      "Background memory reflection task for the banking web app.",
+      "Review the transcript below and decide whether it contains durable knowledge directly and materially about bank infrastructure or bank IT operations.",
+      ...BANK_OPERATIONS_MEMORY_SCOPE_POLICY,
+      "If nothing is worth remembering, do not call memory_save.",
+      "",
+      "<TRANSCRIPT>",
+      input.transcript,
+      "</TRANSCRIPT>",
+    ].join("\n");
 
-    try {
-      await session.bootstrapState({ limit: 1 });
-      await session.updateToolset("none");
-      const result = await session.runTurn(
-        [
-          "Background memory reflection task for the banking web app.",
-          "Review the transcript below and decide whether any concise long-term memory should be saved.",
-          "Use memory_search first when needed to avoid duplicates.",
-          "Call memory_save only for durable organization-wide facts, confirmed plans, policies, procedures, or verified reusable operations lessons.",
-          "There is no private long-term memory. Do not save personal preferences, identity facts, private discussions, or other user-specific content because every saved memory is shared across authenticated accounts.",
-          "Never save passwords, tokens, authorization codes, customer data, raw transcript text, or transient one-off details.",
-          "If nothing is worth remembering, do not call memory_save.",
-          "",
-          "<TRANSCRIPT>",
-          input.transcript,
-          "</TRANSCRIPT>",
-        ].join("\n"),
-        {
-          maxApprovalRecoveryAttempts: MAX_APPROVAL_RECOVERY_ATTEMPTS,
-          recoveryTimeoutMs: APPROVAL_RECOVERY_TIMEOUT_MS,
-        },
-      );
-      if (!result.success) {
-        throw new Error(
-          result.errorDetail ??
-            result.error ??
-            result.stopReason ??
-            "Memory reflection failed",
-        );
-      }
-      const conversationId = result.conversationId ?? session.conversationId;
-      if (!conversationId) {
-        throw new Error("Letta did not return a reflection conversation id");
-      }
-      return {
-        summary: stripHiddenReasoning(result.result ?? ""),
-        lettaConversationId: conversationId,
-        durationMs: result.durationMs,
-      };
-    } finally {
-      session.close();
-    }
+    const failover = await withAgentModelFailover(
+      "memory_reflection",
+      async ({ model }) => {
+        let sideEffectTool: string | null = null;
+        const sessionOptions: LettaCodeClientSessionOptions = {
+          ...getSessionModelOptions(model),
+          permissionMode: "unrestricted",
+          skillSources: [],
+          cwd: "/workspace",
+          tools: createOperationsTools(input.userId, input.agentId, {
+            includeEmail: false,
+            onSideEffect: (toolName) => {
+              sideEffectTool = toolName;
+            },
+          }),
+        };
+        const session = client.createSession(
+          input.agentId,
+          sessionOptions,
+        ) as RecoverableTurnSession;
+
+        try {
+          await prepareLocalSession(input.agentId, session);
+          const result = await session.runTurn(reflectionMessage);
+          if (!result.success) throw resultError(result);
+
+          const conversationId = result.conversationId ?? session.conversationId;
+          if (!conversationId) {
+            throw new Error("Letta did not return a reflection conversation id");
+          }
+          return { result, conversationId };
+        } catch (error) {
+          if (sideEffectTool) {
+            throw new ModelFailoverSuppressedError(
+              `The reflection model failed after the ${sideEffectTool} side effect completed`,
+              error,
+            );
+          }
+          throw error;
+        } finally {
+          session.close();
+        }
+      },
+    );
+
+    return {
+      summary: stripHiddenReasoning(failover.value.result.result ?? ""),
+      lettaConversationId: failover.value.conversationId,
+      durationMs: failover.value.result.durationMs,
+    };
   });
 }
 

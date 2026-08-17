@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
@@ -14,6 +14,7 @@ import {
   destroyAuthenticatedSession,
   getAuthenticatedUser,
   getAuthenticatedUserId,
+  verifyCurrentUserPassword,
 } from "./auth.js";
 import { pool } from "./database.js";
 import { redis, withDistributedLock } from "./redis-leases.js";
@@ -25,6 +26,10 @@ import {
 } from "./infrastructure.js";
 import { listSkills } from "./skill-service.js";
 import {
+  getUserMailStatus,
+  saveUserMailAuthCode,
+} from "./user-mail-service.js";
+import {
   createSchedule,
   deleteSchedule,
   listSchedules,
@@ -35,16 +40,55 @@ import {
   type RecurrenceKind,
 } from "./schedule-service.js";
 
-const loginBody = z.object({
-  username: z
-    .string()
-    .trim()
-    .toLowerCase()
-    .min(3)
-    .max(64)
-    .regex(/^[a-z0-9._-]+$/),
+const loginBody = z
+  .object({
+    identifier: z.string().trim().min(3).max(254).optional(),
+    username: z.string().trim().min(3).max(254).optional(),
+    password: z.string().min(1).max(256),
+  })
+  .superRefine((value, ctx) => {
+    if (!value.identifier && !value.username) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["identifier"],
+        message: "请输入邮箱、手机号或用户名",
+      });
+    }
+  })
+  .transform((value) => ({
+    identifier: (value.identifier ?? value.username ?? "").trim(),
+    password: value.password,
+  }));
+
+const stepUpBody = z.object({
   password: z.string().min(1).max(256),
+  purpose: z.literal("create_daily_email_schedule"),
 });
+
+const EMAIL_SCHEDULE_STEP_UP_TTL_SECONDS = 5 * 60;
+
+function emailScheduleStepUpKey(token: string): string {
+  const digest = createHash("sha256").update(token).digest("hex");
+  return `step-up:create-daily-email-schedule:${digest}`;
+}
+
+async function consumeEmailScheduleStepUpToken(
+  userId: string,
+  token: string | undefined,
+): Promise<boolean> {
+  if (!token) return false;
+  const result = await redis.eval(
+    `if redis.call('get', KEYS[1]) == ARGV[1] then
+       redis.call('del', KEYS[1])
+       return 1
+     end
+     return 0`,
+    1,
+    emailScheduleStepUpKey(token),
+    userId,
+  );
+  return result === 1;
+}
 
 const createConversationBody = z.object({
   title: z.string().trim().min(1).max(200).optional(),
@@ -91,8 +135,10 @@ const attachmentBody = z.discriminatedUnion("kind", [
 const messageBody = z
   .object({
     message: z.string().trim().min(1).max(32_000),
+    display_message: z.string().trim().max(32_000).optional(),
     request_id: z.string().trim().min(1).max(128).optional(),
     attachments: z.array(attachmentBody).max(4).optional(),
+    attachment_upload_ids: z.array(z.string().uuid()).max(4).optional(),
   })
   .superRefine((value, ctx) => {
     const totalBytes = (value.attachments ?? []).reduce(
@@ -169,17 +215,6 @@ function toTurnAttachments(
   });
 }
 
-function displayMessageWithAttachments(
-  message: string,
-  attachments: z.infer<typeof attachmentBody>[] | undefined,
-): string {
-  if (!attachments?.length) return message;
-  const summary = attachments
-    .map((attachment) => `- ${attachment.name} (${attachment.media_type})`)
-    .join("\n");
-  return `${message}\n\n[附件]\n${summary}`;
-}
-
 const scheduleBodyShape = {
   name: z.string().trim().min(1).max(120),
   description: z.string().trim().max(240).default(""),
@@ -187,13 +222,15 @@ const scheduleBodyShape = {
   category: z.string().trim().min(1).max(60).default("custom"),
   icon: z.string().trim().min(1).max(30).default("spark"),
   accent: z.string().trim().min(1).max(30).default("violet"),
-  schedule_type: z.enum(["recurring", "one_off"]),
+  schedule_type: z.literal("recurring"),
   recurrence_kind: z.enum(["daily", "weekdays", "weekly"]).optional().nullable(),
   weekday: z.coerce.number().int().min(0).max(6).optional().nullable(),
   hour: z.coerce.number().int().min(0).max(23),
   minute: z.coerce.number().int().min(0).max(59),
   scheduled_for: z.string().datetime().optional().nullable(),
   recipient_email: z.string().trim().email().optional().nullable(),
+  sender_auth_code: z.string().trim().min(4).max(128).optional(),
+  reauth_token: z.string().uuid().optional(),
   timezone: z.string().trim().min(1).max(80).default("Asia/Shanghai"),
   enabled: z.boolean().optional(),
 };
@@ -205,13 +242,14 @@ const schedulePatchBody = z.object({
   category: z.string().trim().min(1).max(60).optional(),
   icon: z.string().trim().min(1).max(30).optional(),
   accent: z.string().trim().min(1).max(30).optional(),
-  schedule_type: z.enum(["recurring", "one_off"]).optional(),
+  schedule_type: z.literal("recurring").optional(),
   recurrence_kind: z.enum(["daily", "weekdays", "weekly"]).optional().nullable(),
   weekday: z.coerce.number().int().min(0).max(6).optional().nullable(),
   hour: z.coerce.number().int().min(0).max(23).optional(),
   minute: z.coerce.number().int().min(0).max(59).optional(),
   scheduled_for: z.string().datetime().optional().nullable(),
   recipient_email: z.string().trim().email().optional().nullable(),
+  sender_auth_code: z.string().trim().min(4).max(128).optional(),
   timezone: z.string().trim().min(1).max(80).optional(),
   enabled: z.boolean().optional(),
 });
@@ -235,13 +273,6 @@ const scheduleBody = z
         code: z.ZodIssueCode.custom,
         path: ["weekday"],
         message: "Weekly schedule requires weekday",
-      });
-    }
-    if (value.schedule_type === "one_off" && !value.scheduled_for) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["scheduled_for"],
-        message: "One-off schedule requires scheduled_for",
       });
     }
     if (value.category === "daily-email-report" && !value.recipient_email) {
@@ -269,6 +300,89 @@ type TurnRow = {
   status: "processing" | "completed" | "failed";
   duration_ms: number | null;
 };
+
+type IncomingAttachment = z.infer<typeof attachmentBody>;
+
+async function loadUploadedAttachments(
+  userId: string,
+  uploadIds: string[] | undefined,
+): Promise<IncomingAttachment[] | null> {
+  if (!uploadIds?.length) return [];
+  const result = await pool.query<{ id: string; payload: unknown }>(
+    `SELECT id, payload FROM attachment_uploads
+     WHERE user_id = $1 AND id = ANY($2::uuid[])`,
+    [userId, uploadIds],
+  );
+  const byId = new Map(result.rows.map((row) => [row.id, row.payload]));
+  const attachments: IncomingAttachment[] = [];
+  for (const uploadId of uploadIds) {
+    const parsed = attachmentBody.safeParse(byId.get(uploadId));
+    if (!parsed.success) return null;
+    attachments.push(parsed.data);
+  }
+  return attachments;
+}
+
+async function createProcessingTurn(input: {
+  requestId: string;
+  conversationId: string;
+  userId: string;
+  userMessage: string;
+  attachments?: IncomingAttachment[];
+}): Promise<boolean> {
+  const databaseClient = await pool.connect();
+  try {
+    await databaseClient.query("BEGIN");
+    const turnId = randomUUID();
+    const inserted = await databaseClient.query<{ id: string }>(
+      `INSERT INTO turns(
+         id, request_id, conversation_id, user_id, user_message, status
+       ) VALUES ($1, $2, $3, $4, $5, 'processing')
+       ON CONFLICT (user_id, request_id) DO NOTHING
+       RETURNING id`,
+      [
+        turnId,
+        input.requestId,
+        input.conversationId,
+        input.userId,
+        input.userMessage,
+      ],
+    );
+    if (!inserted.rowCount) {
+      await databaseClient.query("COMMIT");
+      return false;
+    }
+    for (const [position, attachment] of (input.attachments ?? []).entries()) {
+      const data =
+        attachment.kind === "image"
+          ? Buffer.from(attachment.data, "base64")
+          : null;
+      await databaseClient.query(
+        `INSERT INTO turn_attachments(
+           id, turn_id, user_id, position, kind, name, media_type, size, data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          randomUUID(),
+          turnId,
+          input.userId,
+          position,
+          attachment.kind,
+          attachment.name,
+          attachment.media_type,
+          attachment.size ?? data?.length ?? null,
+          data,
+        ],
+      );
+    }
+    await databaseClient.query("COMMIT");
+    return true;
+  } catch (error) {
+    await databaseClient.query("ROLLBACK");
+    throw error;
+  } finally {
+    databaseClient.release();
+  }
+}
 
 const MESSAGE_JOB_TTL_SECONDS = 60 * 60;
 
@@ -310,8 +424,17 @@ async function runMessageJob(input: {
   userId: string;
   conversationId: string;
   body: z.infer<typeof messageBody>;
+  uploadedAttachmentIds?: string[];
 }): Promise<void> {
-  const { app, jobId, requestId, userId, conversationId, body } = input;
+  const {
+    app,
+    jobId,
+    requestId,
+    userId,
+    conversationId,
+    body,
+    uploadedAttachmentIds,
+  } = input;
   await updateMessageJob(jobId, {
     status: "running",
     updated_at: new Date().toISOString(),
@@ -357,18 +480,13 @@ async function runMessageJob(input: {
           [userId, requestId],
         );
       } else {
-        await pool.query(
-          `INSERT INTO turns(
-             id, request_id, conversation_id, user_id, user_message, status
-           ) VALUES ($1, $2, $3, $4, $5, 'processing')`,
-          [
-            randomUUID(),
-            requestId,
-            conversationId,
-            userId,
-            displayMessageWithAttachments(body.message, body.attachments),
-          ],
-        );
+        await createProcessingTurn({
+          requestId,
+          conversationId,
+          userId,
+          userMessage: body.display_message ?? body.message,
+          attachments: body.attachments,
+        });
       }
 
       try {
@@ -460,6 +578,14 @@ async function runMessageJob(input: {
       { err: error, jobId, requestId, conversationId, userId },
       "background message job failed",
     );
+  } finally {
+    if (uploadedAttachmentIds?.length) {
+      await pool.query(
+        `DELETE FROM attachment_uploads
+         WHERE user_id = $1 AND id = ANY($2::uuid[])`,
+        [userId, uploadedAttachmentIds],
+      );
+    }
   }
 }
 
@@ -596,7 +722,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/v1/auth/login", async (request, reply) => {
     const body = loginBody.parse(request.body);
-    const throttleKey = `login-attempt:${request.ip}:${body.username}`;
+    const identifierHash = createHash("sha256")
+      .update(body.identifier.toLowerCase())
+      .digest("hex");
+    const throttleKey = `login-attempt:${request.ip}:${identifierHash}`;
     const attempts = Number((await redis.get(throttleKey)) ?? "0");
     if (attempts >= 8) {
       return reply.code(429).send({
@@ -604,7 +733,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const user = await authenticateCredentials(body.username, body.password);
+    const user = await authenticateCredentials(body.identifier, body.password);
     if (!user) {
       const count = await redis.incr(throttleKey);
       if (count === 1) await redis.expire(throttleKey, 15 * 60);
@@ -620,6 +749,39 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     user: await getAuthenticatedUser(request),
   }));
 
+  app.post("/v1/auth/step-up", async (request, reply) => {
+    const user = await getAuthenticatedUser(request);
+    const body = stepUpBody.parse(request.body ?? {});
+    const throttleKey = `step-up-attempt:${request.ip}:${user.id}`;
+    const attempts = Number((await redis.get(throttleKey)) ?? "0");
+    if (attempts >= 5) {
+      return reply.code(429).send({
+        error: "密码复核尝试过多，请在 15 分钟后重试",
+      });
+    }
+
+    const verified = await verifyCurrentUserPassword(user.id, body.password);
+    if (!verified) {
+      const count = await redis.incr(throttleKey);
+      if (count === 1) await redis.expire(throttleKey, 15 * 60);
+      return reply.code(401).send({ error: "登录密码不正确" });
+    }
+
+    await redis.del(throttleKey);
+    const token = randomUUID();
+    await redis.set(
+      emailScheduleStepUpKey(token),
+      user.id,
+      "EX",
+      EMAIL_SCHEDULE_STEP_UP_TTL_SECONDS,
+    );
+    return {
+      token,
+      purpose: body.purpose,
+      expires_in: EMAIL_SCHEDULE_STEP_UP_TTL_SECONDS,
+    };
+  });
+
   app.get("/v1/schedules", async (request) => {
     const userId = await getAuthenticatedUserId(request);
     const schedules = await listSchedules(userId);
@@ -634,6 +796,29 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post("/v1/schedules", async (request, reply) => {
     const userId = await getAuthenticatedUserId(request);
     const body = scheduleBody.parse(request.body ?? {});
+    if (body.category === "daily-email-report") {
+      const mailStatus = await getUserMailStatus(userId);
+      if (!mailStatus.email) {
+        return reply.code(400).send({ error: "当前账号尚未绑定发件邮箱" });
+      }
+      if (!mailStatus.authCodeConfigured && !body.sender_auth_code) {
+        return reply.code(400).send({
+          error: "请先填写当前账号绑定邮箱的授权码",
+        });
+      }
+      const authorized = await consumeEmailScheduleStepUpToken(
+        userId,
+        body.reauth_token,
+      );
+      if (!authorized) {
+        return reply.code(403).send({
+          error: "密码复核已失效，请重新验证后再创建每日运维邮件",
+        });
+      }
+    }
+    if (body.sender_auth_code) {
+      await saveUserMailAuthCode(userId, body.sender_auth_code);
+    }
     const schedule = await createSchedule({
       userId,
       name: body.name,
@@ -663,6 +848,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const userId = await getAuthenticatedUserId(request);
       const scheduleId = z.string().uuid().parse(request.params.scheduleId);
       const body = schedulePatchBody.parse(request.body ?? {});
+      if (body.sender_auth_code) {
+        await saveUserMailAuthCode(userId, body.sender_auth_code);
+      }
+      if (body.category === "daily-email-report") {
+        const mailStatus = await getUserMailStatus(userId);
+        if (!mailStatus.email || !mailStatus.authCodeConfigured) {
+          return reply.code(400).send({
+            error: "请先填写当前账号绑定邮箱的授权码",
+          });
+        }
+      }
       const schedule = await updateSchedule(userId, scheduleId, {
         name: body.name,
         description: body.description,
@@ -833,14 +1029,83 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(404).send({ error: "Conversation not found" });
       }
       const turns = await pool.query(
-        `SELECT request_id, user_message, assistant_message, status, error,
+        `SELECT id, request_id, user_message, assistant_message, status, error,
                 duration_ms, created_at, completed_at
          FROM turns
          WHERE conversation_id = $1 AND user_id = $2
          ORDER BY created_at ASC`,
         [conversationId, userId],
       );
-      return { messages: turns.rows };
+      const turnIds = turns.rows.map((turn) => turn.id as string);
+      const attachments = turnIds.length
+        ? await pool.query<{
+            id: string;
+            turn_id: string;
+            kind: IncomingAttachment["kind"];
+            name: string;
+            media_type: string;
+            size: number | null;
+            has_data: boolean;
+          }>(
+            `SELECT id, turn_id, kind, name, media_type, size,
+                    data IS NOT NULL AS has_data
+             FROM turn_attachments
+             WHERE user_id = $1 AND turn_id = ANY($2::uuid[])
+             ORDER BY turn_id, position`,
+            [userId, turnIds],
+          )
+        : { rows: [] };
+      const attachmentsByTurn = new Map<string, unknown[]>();
+      for (const attachment of attachments.rows) {
+        const turnAttachments = attachmentsByTurn.get(attachment.turn_id) ?? [];
+        turnAttachments.push({
+          id: attachment.id,
+          kind: attachment.kind,
+          name: attachment.name,
+          media_type: attachment.media_type,
+          size: attachment.size,
+          url: attachment.has_data
+            ? `/v1/turn-attachments/${attachment.id}`
+            : null,
+        });
+        attachmentsByTurn.set(attachment.turn_id, turnAttachments);
+      }
+      return {
+        messages: turns.rows.map(({ id, ...turn }) => ({
+          ...turn,
+          attachments: attachmentsByTurn.get(id as string) ?? [],
+        })),
+      };
+    },
+  );
+
+  app.get<{ Params: { attachmentId: string } }>(
+    "/v1/turn-attachments/:attachmentId",
+    async (request, reply) => {
+      const userId = await getAuthenticatedUserId(request);
+      const attachmentId = z.string().uuid().parse(request.params.attachmentId);
+      const result = await pool.query<{
+        name: string;
+        media_type: string;
+        data: Buffer | null;
+      }>(
+        `SELECT name, media_type, data
+         FROM turn_attachments
+         WHERE id = $1 AND user_id = $2`,
+        [attachmentId, userId],
+      );
+      const attachment = result.rows[0];
+      if (!attachment?.data) {
+        return reply.code(404).send({ error: "Attachment not found" });
+      }
+      const encodedName = encodeURIComponent(attachment.name);
+      reply
+        .header("Content-Type", attachment.media_type)
+        .header("Content-Length", attachment.data.length)
+        .header("Content-Disposition", `inline; filename*=UTF-8''${encodedName}`)
+        .header("Cache-Control", "private, no-store, max-age=0")
+        .header("X-Content-Type-Options", "nosniff");
+      return reply.send(attachment.data);
     },
   );
 
@@ -886,18 +1151,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             [userId, requestId],
           );
         } else {
-          await pool.query(
-            `INSERT INTO turns(
-               id, request_id, conversation_id, user_id, user_message, status
-             ) VALUES ($1, $2, $3, $4, $5, 'processing')`,
-            [
-              randomUUID(),
-              requestId,
-              conversationId,
-              userId,
-              displayMessageWithAttachments(body.message, body.attachments),
-            ],
-          );
+          await createProcessingTurn({
+            requestId,
+            conversationId,
+            userId,
+            userMessage: body.display_message ?? body.message,
+            attachments: body.attachments,
+          });
         }
 
         try {
@@ -966,6 +1226,36 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.post("/v1/attachment-uploads", async (request, reply) => {
+    const userId = await getAuthenticatedUserId(request);
+    const attachment = attachmentBody.parse(request.body);
+    const uploadId = randomUUID();
+    await pool.query(
+      `INSERT INTO attachment_uploads(id, user_id, payload)
+       VALUES ($1, $2, $3::jsonb)`,
+      [uploadId, userId, JSON.stringify(attachment)],
+    );
+    await pool.query(
+      `DELETE FROM attachment_uploads
+       WHERE user_id = $1 AND created_at < now() - interval '24 hours'`,
+      [userId],
+    );
+    return reply.code(201).send({ upload_id: uploadId });
+  });
+
+  app.delete<{ Params: { uploadId: string } }>(
+    "/v1/attachment-uploads/:uploadId",
+    async (request, reply) => {
+      const userId = await getAuthenticatedUserId(request);
+      const uploadId = z.string().uuid().parse(request.params.uploadId);
+      await pool.query(
+        "DELETE FROM attachment_uploads WHERE id = $1 AND user_id = $2",
+        [uploadId, userId],
+      );
+      return reply.code(204).send();
+    },
+  );
+
   app.post<{ Params: { conversationId: string } }>(
     "/v1/conversations/:conversationId/message-jobs",
     async (request, reply) => {
@@ -981,6 +1271,50 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       );
       if (!owned.rowCount) {
         return reply.code(404).send({ error: "Conversation not found" });
+      }
+
+      const uploadedAttachments = await loadUploadedAttachments(
+        userId,
+        body.attachment_upload_ids,
+      );
+      if (!uploadedAttachments) {
+        return reply.code(400).send({ error: "One or more attachments were not uploaded" });
+      }
+      const resolvedAttachments = [
+        ...(body.attachments ?? []),
+        ...uploadedAttachments,
+      ];
+      if (resolvedAttachments.length > 4) {
+        return reply.code(400).send({ error: "A message can include at most 4 attachments" });
+      }
+      const resolvedAttachmentBytes = resolvedAttachments.reduce(
+        (sum, attachment) => sum + (attachment.size ?? 0),
+        0,
+      );
+      if (resolvedAttachmentBytes > 20 * 1024 * 1024) {
+        return reply.code(400).send({ error: "Attachments cannot exceed 20MB in total" });
+      }
+      const resolvedBody = {
+        ...body,
+        attachments: resolvedAttachments,
+      };
+
+      const turnCreated = await createProcessingTurn({
+        requestId,
+        conversationId,
+        userId,
+        userMessage: resolvedBody.display_message ?? resolvedBody.message,
+        attachments: resolvedBody.attachments,
+      });
+      if (!turnCreated) {
+        const existingTurn = await pool.query<{ conversation_id: string }>(
+          `SELECT conversation_id FROM turns
+           WHERE user_id = $1 AND request_id = $2`,
+          [userId, requestId],
+        );
+        if (existingTurn.rows[0]?.conversation_id !== conversationId) {
+          return reply.code(409).send({ error: "Request ID belongs to another conversation" });
+        }
       }
 
       const metaKey = messageJobMetaKey(jobId);
@@ -1014,7 +1348,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           requestId,
           userId,
           conversationId,
-          body,
+          body: resolvedBody,
+          uploadedAttachmentIds: body.attachment_upload_ids,
         });
       });
 
@@ -1040,7 +1375,56 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const metaKey = messageJobMetaKey(jobId);
     const meta = await redis.hgetall(metaKey);
     if (!meta.user_id || meta.user_id !== userId) {
-      return reply.code(404).send({ error: "Message job not found" });
+      const turnResult = await pool.query<{
+        request_id: string;
+        conversation_id: string;
+        assistant_message: string | null;
+        status: "processing" | "completed" | "failed";
+        error: string | null;
+        duration_ms: number | null;
+      }>(
+        `SELECT request_id, conversation_id, assistant_message, status, error, duration_ms
+         FROM turns WHERE user_id = $1 AND request_id = $2`,
+        [userId, jobId],
+      );
+      const turn = turnResult.rows[0];
+      if (!turn) {
+        return reply.code(404).send({ error: "Message job not found" });
+      }
+
+      const events =
+        turn.status === "completed"
+          ? [
+              {
+                type: "final",
+                request_id: turn.request_id,
+                conversation_id: turn.conversation_id,
+                answer: turn.assistant_message ?? "",
+                duration_ms: turn.duration_ms,
+                recovered_from_database: true,
+              },
+            ]
+          : turn.status === "failed"
+            ? [
+                {
+                  type: "error",
+                  request_id: turn.request_id,
+                  conversation_id: turn.conversation_id,
+                  error: turn.error ?? "Agent job failed",
+                  recovered_from_database: true,
+                },
+              ]
+            : [];
+      return {
+        job_id: jobId,
+        request_id: turn.request_id,
+        conversation_id: turn.conversation_id,
+        status: turn.status === "processing" ? "running" : turn.status,
+        error: turn.error,
+        events,
+        next_cursor: query.after,
+        recovered_from_database: true,
+      };
     }
 
     const serializedEvents = await redis.lrange(
@@ -1133,18 +1517,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             [userId, requestId],
           );
         } else {
-          await pool.query(
-            `INSERT INTO turns(
-               id, request_id, conversation_id, user_id, user_message, status
-             ) VALUES ($1, $2, $3, $4, $5, 'processing')`,
-            [
-              randomUUID(),
-              requestId,
-              conversationId,
-              userId,
-              displayMessageWithAttachments(body.message, body.attachments),
-            ],
-          );
+          await createProcessingTurn({
+            requestId,
+            conversationId,
+            userId,
+            userMessage: body.display_message ?? body.message,
+            attachments: body.attachments,
+          });
         }
 
         try {

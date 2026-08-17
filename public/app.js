@@ -2,10 +2,12 @@
   const authGate = document.querySelector("#authGate");
   const appShell = document.querySelector("#appShell");
   const loginForm = document.querySelector("#loginForm");
-  const username = document.querySelector("#username");
+  const loginIdentifier = document.querySelector("#loginIdentifier");
   const password = document.querySelector("#password");
   const loginButton = document.querySelector("#loginButton");
   const loginError = document.querySelector("#loginError");
+  const accountMenuButton = document.querySelector("#accountMenuButton");
+  const accountMenu = document.querySelector("#accountMenu");
 
   const navInfrastructure = document.querySelector("#navInfrastructure");
   const navVendors = document.querySelector("#navVendors");
@@ -26,11 +28,9 @@
 
   const assistantSchedulesTab = document.querySelector("#assistantSchedulesTab");
   const assistantNewChat = document.querySelector("#assistantNewChat");
-  const pinnedConversations = document.querySelector("#pinnedConversations");
   const chatConversations = document.querySelector("#chatConversations");
   const chatWorkspace = document.querySelector("#chatWorkspace");
   const scheduleWorkspace = document.querySelector("#scheduleWorkspace");
-  const chatRefreshButton = document.querySelector("#chatRefreshButton");
   const conversationHeading = document.querySelector("#conversationHeading");
   const messages = document.querySelector("#messages");
   const suggestions = document.querySelector("#assistantSuggestions");
@@ -64,21 +64,40 @@
   const schedulePrompt = document.querySelector("#schedulePrompt");
   const scheduleEnvironment = document.querySelector("#scheduleEnvironment");
   const scheduleConversation = document.querySelector("#scheduleConversation");
-  const scheduleType = document.querySelector("#scheduleType");
   const scheduleRecurrenceKind = document.querySelector("#scheduleRecurrenceKind");
   const scheduleWeekday = document.querySelector("#scheduleWeekday");
   const scheduleTime = document.querySelector("#scheduleTime");
-  const scheduleDateTime = document.querySelector("#scheduleDateTime");
   const scheduleEmailRecipient = document.querySelector("#scheduleEmailRecipient");
+  const scheduleSenderEmail = document.querySelector("#scheduleSenderEmail");
+  const scheduleSenderAuthCode = document.querySelector("#scheduleSenderAuthCode");
   const recurrenceKindField = document.querySelector("#recurrenceKindField");
   const weekdayField = document.querySelector("#weekdayField");
   const timeField = document.querySelector("#timeField");
-  const oneOffField = document.querySelector("#oneOffField");
   const emailRecipientField = document.querySelector("#emailRecipientField");
+  const emailSenderField = document.querySelector("#emailSenderField");
+  const emailAuthCodeField = document.querySelector("#emailAuthCodeField");
+  const emailAuthCodeHint = document.querySelector("#emailAuthCodeHint");
+  const stepUpModal = document.querySelector("#stepUpModal");
+  const stepUpForm = document.querySelector("#stepUpForm");
+  const stepUpPassword = document.querySelector("#stepUpPassword");
+  const stepUpError = document.querySelector("#stepUpError");
+  const closeStepUpModal = document.querySelector("#closeStepUpModal");
+  const cancelStepUpButton = document.querySelector("#cancelStepUpButton");
+  const submitStepUpButton = document.querySelector("#submitStepUpButton");
+
+  const pageStateKey = "bank-agent:current-page";
+  const assistantViewStateKey = "bank-agent:assistant-view";
+  const conversationStateKey = "bank-agent:conversation-id";
+  const storedPage = window.sessionStorage.getItem(pageStateKey);
+  const storedAssistantView = window.sessionStorage.getItem(assistantViewStateKey);
 
   let currentUser = null;
-  let currentPage = "infrastructure";
-  let assistantView = "schedules";
+  let currentPage = ["infrastructure", "vendors", "assistant"].includes(storedPage)
+    ? storedPage
+    : "infrastructure";
+  let assistantView = ["schedules", "chat"].includes(storedAssistantView)
+    ? storedAssistantView
+    : "schedules";
   let datacenters = [];
   let vendors = [];
   let searchTimer = null;
@@ -87,16 +106,22 @@
   let conversations = [];
   let pendingConversationIds = new Set();
   const conversationStreams = new Map();
+  const conversationTurnCache = new Map();
   const streamAnimationFrames = new Map();
   let conversationLoadVersion = 0;
   let schedules = [];
   let templates = [];
   let scheduleFilter = "all";
   let suppressMessageAutoScroll = false;
+  let pageIsUnloading = false;
   let pendingAttachments = [];
+  const activeAttachmentReaders = new Set();
+  const activeAttachmentRequests = new Set();
   let skills = [];
   let visibleSkills = [];
   let skillSelectionIndex = 0;
+  let pendingStepUpTemplate = null;
+  let emailScheduleReauthToken = null;
 
   const setButtonBusy = (button, busy, label = "") => {
     if (!button) return;
@@ -338,18 +363,7 @@
     throw lastError ?? new Error("连接智能助手失败，请稍后重试");
   };
 
-  const runMessageJobRequest = async (path, payload, onEvent) => {
-    const accepted = await gatewayRequest(
-      path,
-      {
-        method: "POST",
-        body: JSON.stringify(payload),
-      },
-      12,
-    );
-    const jobId = accepted.job_id;
-    if (!jobId) throw new Error("服务未返回任务编号");
-
+  const pollMessageJobRequest = async (jobId, onEvent) => {
     let cursor = 0;
     let finalEvent = null;
     const deadline = Date.now() + 15 * 60 * 1000;
@@ -366,12 +380,118 @@
       }
       if (snapshot.status === "completed") return finalEvent;
       if (snapshot.status === "failed") {
-        throw new Error(snapshot.error || "智能助手处理失败");
+        const error = new Error(snapshot.error || "智能助手处理失败");
+        error.jobFailed = true;
+        throw error;
       }
       cursor = Math.max(cursor, Number(snapshot.next_cursor) || cursor);
       await wait(500);
     }
     throw new Error("智能助手处理超时，请稍后刷新会话查看结果");
+  };
+
+  const runMessageJobRequest = async (path, payload, onEvent) => {
+    const accepted = await gatewayRequest(
+      path,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      12,
+    );
+    const jobId = accepted.job_id;
+    if (!jobId) throw new Error("服务未返回任务编号");
+    return pollMessageJobRequest(jobId, onEvent);
+  };
+
+  const resumedMessageJobs = new Set();
+
+  const applyConversationJobEvent = async (
+    targetConversationId,
+    requestId,
+    event,
+  ) => {
+    const state = conversationStreams.get(targetConversationId);
+    if (!state || state.requestId !== requestId) return false;
+    if (event.type === "delta") {
+      enqueueConversationDelta(targetConversationId, requestId, event.text || "");
+      return false;
+    }
+    if (event.type === "final") {
+      const finalAnswer = event.answer || state.receivedText || state.text;
+      await finishConversationStream(targetConversationId, requestId, finalAnswer);
+      updateCachedTurn(targetConversationId, requestId, {
+        assistant_message: finalAnswer,
+        status: "completed",
+        error: null,
+      });
+      return true;
+    }
+    if (event.type === "error") {
+      const error = new Error(event.error || "Agent job failed");
+      error.jobFailed = true;
+      throw error;
+    }
+    return false;
+  };
+
+  const resumeConversationJob = async (targetConversationId, requestId) => {
+    if (!targetConversationId || !requestId || resumedMessageJobs.has(requestId)) return;
+    resumedMessageJobs.add(requestId);
+    pendingConversationIds.add(targetConversationId);
+    conversationStreams.set(targetConversationId, {
+      requestId,
+      status: "pending",
+      text: "",
+      receivedText: "",
+      pendingCharacters: [],
+      finalAnswer: null,
+      resolveAnimation: null,
+      answer: "",
+      error: "",
+      waitingText: "正在查询智能体…",
+    });
+    updateComposerState();
+    renderConversationGroups();
+    renderConversationStream(targetConversationId, true);
+
+    try {
+      await pollMessageJobRequest(requestId, (event) =>
+        applyConversationJobEvent(targetConversationId, requestId, event),
+      );
+      await refreshConversations();
+      if (conversationId === targetConversationId) {
+        const result = await request(`/v1/conversations/${targetConversationId}/messages`);
+        if (conversationId === targetConversationId) {
+          conversationTurnCache.set(targetConversationId, result.messages ?? []);
+          renderTurns(result.messages ?? []);
+        }
+      }
+    } catch (error) {
+      const state = conversationStreams.get(targetConversationId);
+      if (state?.requestId === requestId) {
+        cancelStreamAnimation(requestId);
+        state.pendingCharacters = [];
+        state.status = "failed";
+        state.error = error.jobFailed
+          ? `处理失败：${error.message}`
+          : `连接中断：${error.message}。刷新页面可继续恢复。`;
+        if (error.jobFailed) {
+          updateCachedTurn(targetConversationId, requestId, {
+            assistant_message: "",
+            status: "failed",
+            error: state.error,
+          });
+        }
+        renderConversationStream(targetConversationId);
+      }
+      if (error.status === 401) showLogin();
+    } finally {
+      pendingConversationIds.delete(targetConversationId);
+      resumedMessageJobs.delete(requestId);
+      updateComposerState();
+      renderConversationGroups();
+    }
   };
 
   const avatarClass = (user) =>
@@ -443,7 +563,18 @@
     return wrapper;
   };
 
-  const appendMessage = (content, role, extra = "", shouldScroll = false) => {
+  const stripLegacyAttachmentSummary = (content) =>
+    String(content ?? "")
+      .replace(/\n{2,}\[\u9644\u4ef6\]\n(?:- [^\n]+(?:\n|$))+/u, "")
+      .trim();
+
+  const appendMessage = (
+    content,
+    role,
+    extra = "",
+    shouldScroll = false,
+    messageAttachments = [],
+  ) => {
     const element = document.createElement("div");
     element.className = `msg ${role} ${extra}`.trim();
     if (role === "assistant" && !extra) {
@@ -452,14 +583,36 @@
       } else {
         element.textContent = content;
       }
+    } else if (role === "user") {
+      const visibleContent = stripLegacyAttachmentSummary(content);
+      if (messageAttachments.length) {
+        element.classList.add("has-attachments");
+        renderMessageAttachments(element, messageAttachments);
+      }
+      if (visibleContent) {
+        const text = document.createElement("div");
+        text.className = "message-text";
+        text.textContent = visibleContent;
+        element.append(text);
+      }
     } else {
       element.textContent = content;
     }
     messages.append(element);
     if (shouldScroll && !suppressMessageAutoScroll) {
-      messages.scrollTop = messages.scrollHeight;
+      scrollConversationToBottom();
     }
     return element;
+  };
+
+  const scrollConversationToBottom = () => {
+    messages.scrollTop = messages.scrollHeight;
+  };
+
+  const scrollPromptToReadingPosition = (element) => {
+    if (!element) return;
+    const targetTop = Math.max(0, element.offsetTop - messages.clientHeight * 0.32);
+    messages.scrollTop = targetTop;
   };
 
   const findStreamMessage = (requestId) =>
@@ -503,7 +656,7 @@
     }
 
     if (shouldScroll && !suppressMessageAutoScroll) {
-      messages.scrollTop = messages.scrollHeight;
+      scrollConversationToBottom();
     }
   };
 
@@ -597,13 +750,71 @@
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   };
 
-  const readAsDataUrl = (file) =>
+  const readAsDataUrl = (file, onProgress = () => {}) =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.addEventListener("load", () => resolve(String(reader.result)));
-      reader.addEventListener("error", () => reject(reader.error));
+      activeAttachmentReaders.add(reader);
+      reader.addEventListener("load", () => {
+        activeAttachmentReaders.delete(reader);
+        resolve(String(reader.result));
+      });
+      reader.addEventListener("error", () => {
+        activeAttachmentReaders.delete(reader);
+        reject(reader.error);
+      });
+      reader.addEventListener("abort", () => {
+        activeAttachmentReaders.delete(reader);
+        reject(new Error("附件读取已取消"));
+      });
+      reader.addEventListener("progress", (event) => {
+        if (event.lengthComputable) onProgress(event.loaded / event.total);
+      });
       reader.readAsDataURL(file);
     });
+
+  const uploadAttachment = (attachment, onProgress) =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      activeAttachmentRequests.add(xhr);
+      xhr.open("POST", "/v1/attachment-uploads");
+      xhr.withCredentials = true;
+      xhr.setRequestHeader("Content-Type", "application/json");
+      xhr.upload.addEventListener("progress", (event) => {
+        if (event.lengthComputable) onProgress(event.loaded / event.total);
+      });
+      xhr.addEventListener("load", () => {
+        activeAttachmentRequests.delete(xhr);
+        let body = {};
+        try {
+          body = JSON.parse(xhr.responseText || "{}");
+        } catch {
+          body = {};
+        }
+        if (xhr.status >= 200 && xhr.status < 300 && body.upload_id) {
+          resolve(body.upload_id);
+          return;
+        }
+        reject(Object.assign(new Error(body.error || `HTTP ${xhr.status}`), {
+          status: xhr.status,
+        }));
+      });
+      xhr.addEventListener("error", () => {
+        activeAttachmentRequests.delete(xhr);
+        reject(new Error("附件上传失败"));
+      });
+      xhr.addEventListener("abort", () => {
+        activeAttachmentRequests.delete(xhr);
+        reject(new Error("附件上传已取消"));
+      });
+      xhr.send(JSON.stringify(attachment));
+    });
+
+  const discardAttachmentUpload = (uploadId) => {
+    if (!uploadId) return;
+    void request(`/v1/attachment-uploads/${encodeURIComponent(uploadId)}`, {
+      method: "DELETE",
+    }).catch(() => null);
+  };
 
   const supportedDocumentPattern =
     /\.(pdf|docx|pptx|xlsx|odt|ods|odp|rtf|epub|txt|md|log|csv|tsv|json|jsonl|yaml|yml|xml|html?|sql|py|js|mjs|cjs|jsx|ts|tsx|java|c|h|cpp|hpp|go|rs|sh|ps1|ini|conf|properties)$/i;
@@ -660,12 +871,78 @@
   };
 
   const openImagePreview = (attachment) => {
-    if (!attachment.previewUrl) return;
+    const source = attachment.previewUrl || attachment.url;
+    if (!source) return;
     const lightbox = ensureImagePreviewLightbox();
-    lightbox.image.src = attachment.previewUrl;
+    lightbox.image.src = source;
     lightbox.image.alt = attachment.name;
     lightbox.backdrop.hidden = false;
     document.body.classList.add("image-lightbox-open");
+  };
+
+  const renderMessageAttachments = (container, attachments) => {
+    const images = attachments.filter(
+      (attachment) =>
+        attachment.kind === "image" &&
+        (attachment.previewUrl || attachment.url),
+    );
+    const files = attachments.filter((attachment) => attachment.kind !== "image");
+
+    if (images.length) {
+      const grid = document.createElement("div");
+      grid.className = `message-image-grid count-${Math.min(images.length, 4)}`;
+      images.forEach((attachment) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "message-image-button";
+        button.setAttribute("aria-label", `查看图片 ${attachment.name}`);
+        button.title = attachment.name;
+
+        const image = document.createElement("img");
+        image.src = attachment.previewUrl || attachment.url;
+        image.alt = attachment.name;
+        image.loading = "lazy";
+        image.decoding = "async";
+        button.append(image);
+        button.addEventListener("click", () => openImagePreview(attachment));
+        grid.append(button);
+      });
+      container.append(grid);
+    }
+
+    if (files.length) {
+      const list = document.createElement("div");
+      list.className = "message-file-list";
+      files.forEach((attachment) => {
+        const file = document.createElement("div");
+        file.className = "message-file-card";
+        const icon = document.createElement("span");
+        icon.className = "attachment-file-icon";
+        icon.textContent = attachmentIcon(attachment);
+        const meta = document.createElement("span");
+        meta.className = "message-file-meta";
+        const name = document.createElement("strong");
+        name.textContent = attachment.name;
+        const size = document.createElement("small");
+        size.textContent = formatBytes(attachment.size);
+        meta.append(name, size);
+        file.append(icon, meta);
+        list.append(file);
+      });
+      container.append(list);
+    }
+  };
+
+  const updateAttachmentProgress = (attachment) => {
+    const item = [...attachmentPreview.querySelectorAll("[data-attachment-local-id]")]
+      .find((element) => element.dataset.attachmentLocalId === attachment.localId);
+    if (!item) return;
+    const progress = item.querySelector(".attachment-upload-progress");
+    const detail = item.querySelector(".attachment-chip-detail");
+    const value = Math.max(4, Math.min(100, attachment.progress || 0));
+    progress?.style.setProperty("--attachment-progress", String(value));
+    progress?.setAttribute("aria-valuenow", String(Math.round(attachment.progress || 0)));
+    if (detail) detail.textContent = `上传中 ${Math.round(attachment.progress || 0)}%`;
   };
 
   const renderAttachmentPreview = () => {
@@ -674,7 +951,20 @@
     pendingAttachments.forEach((attachment, index) => {
       const item = document.createElement("div");
       item.className = `attachment-chip ${attachment.kind}`;
-      if (attachment.kind === "image") {
+      item.dataset.attachmentLocalId = attachment.localId;
+      if (attachment.loading) {
+        const progress = document.createElement("span");
+        progress.className = "attachment-upload-progress";
+        progress.style.setProperty(
+          "--attachment-progress",
+          String(Math.max(4, Math.min(100, attachment.progress || 0))),
+        );
+        progress.setAttribute("role", "progressbar");
+        progress.setAttribute("aria-valuemin", "0");
+        progress.setAttribute("aria-valuemax", "100");
+        progress.setAttribute("aria-valuenow", String(Math.round(attachment.progress || 0)));
+        item.append(progress);
+      } else if (attachment.kind === "image") {
         const previewButton = document.createElement("button");
         previewButton.type = "button";
         previewButton.className = "attachment-image-preview";
@@ -693,13 +983,21 @@
       }
       const meta = document.createElement("span");
       meta.className = "attachment-chip-meta";
-      meta.textContent = `${attachment.name} · ${formatBytes(attachment.size)}`;
+      const name = document.createElement("strong");
+      name.textContent = attachment.name;
+      const detail = document.createElement("small");
+      detail.className = "attachment-chip-detail";
+      detail.textContent = attachment.loading
+        ? `上传中 ${Math.round(attachment.progress || 0)}%`
+        : `${attachmentIcon(attachment)} · ${formatBytes(attachment.size)}`;
+      meta.append(name, detail);
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "×";
       remove.setAttribute("aria-label", `移除 ${attachment.name}`);
       remove.addEventListener("click", () => {
-        pendingAttachments.splice(index, 1);
+        const [removed] = pendingAttachments.splice(index, 1);
+        discardAttachmentUpload(removed?.uploadId);
         renderAttachmentPreview();
         updateComposerState();
       });
@@ -725,6 +1023,11 @@
   const addFiles = async (files) => {
     const selected = [...files];
     const errors = [];
+    const uploads = [];
+    let totalBytes = pendingAttachments.reduce(
+      (sum, attachment) => sum + (attachment.size || 0),
+      0,
+    );
     for (const file of selected) {
       if (pendingAttachments.length >= 4) {
         errors.push("一次最多添加 4 个附件。");
@@ -735,14 +1038,12 @@
           errors.push(`${file.name} 是空文件，无法发送。`);
           continue;
         }
-        const totalBytes = pendingAttachments.reduce(
-          (sum, attachment) => sum + (attachment.size || 0),
-          0,
-        );
         if (totalBytes + file.size > 20 * 1024 * 1024) {
           errors.push("附件总大小不能超过 20MB。");
           continue;
         }
+        let kind;
+        let mediaType;
         if (file.type.startsWith("image/")) {
           if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type)) {
             errors.push(`${file.name} 不是支持的图片格式。`);
@@ -752,69 +1053,110 @@
             errors.push(`${file.name} 超过 4MB，无法发送。`);
             continue;
           }
-          const dataUrl = await readAsDataUrl(file);
-          const [, data = ""] = dataUrl.split(",");
-          pendingAttachments.push({
-            kind: "image",
-            name: file.name,
-            media_type: file.type,
-            data,
-            size: file.size,
-            previewUrl: dataUrl,
-          });
+          kind = "image";
+          mediaType = file.type;
         } else if (isPdfFile(file)) {
           if (file.size > 20 * 1024 * 1024) {
             errors.push(`${file.name} 超过 20MB，无法解析。`);
             continue;
           }
-          const dataUrl = await readAsDataUrl(file);
-          const [, data = ""] = dataUrl.split(",");
-          pendingAttachments.push({
-            kind: "pdf",
-            name: file.name,
-            media_type: "application/pdf",
-            data,
-            size: file.size,
-          });
+          kind = "pdf";
+          mediaType = "application/pdf";
         } else if (isSupportedDocument(file)) {
           if (file.size > 20 * 1024 * 1024) {
             errors.push(`${file.name} 超过 20MB，无法解析。`);
             continue;
           }
-          const dataUrl = await readAsDataUrl(file);
-          const [, data = ""] = dataUrl.split(",");
-          pendingAttachments.push({
-            kind: "document",
-            name: file.name,
-            media_type: file.type || "application/octet-stream",
-            data,
-            size: file.size,
-          });
+          kind = "document";
+          mediaType = file.type || "application/octet-stream";
         } else {
           errors.push(
             `${file.name} 暂不支持，请转换为 PDF、DOCX、PPTX、XLSX、ODT、RTF、EPUB 或纯文本格式。`,
           );
+          continue;
         }
+
+        const attachment = {
+          localId: createRequestId(),
+          kind,
+          name: file.name,
+          media_type: mediaType,
+          size: file.size,
+          loading: true,
+          progress: 0,
+        };
+        pendingAttachments.push(attachment);
+        uploads.push({ file, attachment });
+        totalBytes += file.size;
       } catch (error) {
         errors.push(`${file.name} 读取失败：${error.message || "未知错误"}`);
       }
     }
     renderAttachmentPreview();
-    errors.forEach(showAttachmentError);
     updateComposerState();
+
+    await Promise.all(
+      uploads.map(async ({ file, attachment }) => {
+        let lastProgressPaint = 0;
+        const setProgress = (value) => {
+          const nextProgress = Math.max(0, Math.min(100, Math.round(value)));
+          if (nextProgress === attachment.progress) return;
+          attachment.progress = nextProgress;
+          const now = performance.now();
+          if (
+            !pageIsUnloading &&
+            pendingAttachments.includes(attachment) &&
+            (nextProgress >= 100 || now - lastProgressPaint >= 100)
+          ) {
+            lastProgressPaint = now;
+            updateAttachmentProgress(attachment);
+          }
+        };
+        try {
+          const dataUrl = await readAsDataUrl(file, (progress) =>
+            setProgress(progress * 20),
+          );
+          const [, data = ""] = dataUrl.split(",");
+          const payload = {
+            kind: attachment.kind,
+            name: attachment.name,
+            media_type: attachment.media_type,
+            data,
+            size: attachment.size,
+          };
+          const uploadId = await uploadAttachment(payload, (progress) =>
+            setProgress(20 + progress * 80),
+          );
+          if (!pendingAttachments.includes(attachment)) {
+            discardAttachmentUpload(uploadId);
+            return;
+          }
+          attachment.uploadId = uploadId;
+          attachment.loading = false;
+          attachment.progress = 100;
+          if (attachment.kind === "image") attachment.previewUrl = dataUrl;
+        } catch (error) {
+          const index = pendingAttachments.indexOf(attachment);
+          if (index >= 0) pendingAttachments.splice(index, 1);
+          errors.push(`${file.name} 上传失败：${error.message || "未知错误"}`);
+        } finally {
+          if (!pageIsUnloading) {
+            renderAttachmentPreview();
+            updateComposerState();
+          }
+        }
+      }),
+    );
+    if (!pageIsUnloading) errors.forEach(showAttachmentError);
   };
 
-  const attachmentSummary = (attachments) =>
-    attachments.length
-      ? `\n\n[附件]\n${attachments
-          .map((attachment) => `- ${attachment.name} (${attachment.media_type})`)
-          .join("\n")}`
-      : "";
-
-  const serializeAttachments = (attachments) =>
-    attachments.map(({ previewUrl, ...attachment }) => attachment);
+  const displayAttachments = (attachments) =>
+    attachments.map(({ data, text, ...attachment }) => attachment);
 
   const clearPendingAttachments = () => {
+    pendingAttachments.forEach((attachment) =>
+      discardAttachmentUpload(attachment.uploadId),
+    );
     pendingAttachments = [];
     renderAttachmentPreview();
     updateComposerState();
@@ -827,7 +1169,22 @@
     headerAvatar.className = avatarClass(currentUser);
     headerAvatar.textContent = currentUser.display_name.slice(0, 1);
     headerName.textContent = currentUser.display_name;
-    headerUsername.textContent = `@${currentUser.username}`;
+    headerUsername.textContent = currentUser.email || `@${currentUser.username}`;
+    const profileAvatar = document.querySelector("#profileAvatar");
+    profileAvatar.className = avatarClass(currentUser);
+    profileAvatar.textContent = currentUser.display_name.slice(0, 1);
+    document.querySelector("#profileName").textContent = currentUser.display_name;
+    document.querySelector("#profileUsername").textContent = `@${currentUser.username}`;
+    document.querySelector("#profileEmail").textContent = currentUser.email || "未绑定";
+    document.querySelector("#profilePhone").textContent = currentUser.phone || "未绑定";
+    const status = document.querySelector("#profileMailStatus");
+    status.textContent = currentUser.mail_auth_configured ? "已配置" : "未配置";
+    status.classList.toggle("configured", currentUser.mail_auth_configured);
+  };
+
+  const closeAccountMenu = () => {
+    accountMenu.hidden = true;
+    accountMenuButton.setAttribute("aria-expanded", "false");
   };
 
   const renderMachines = (machines) => {
@@ -1136,14 +1493,33 @@
     };
 
     writeGroup(
-      pinnedConversations,
-      conversations.slice(0, 1),
-      "还没有置顶会话。第一段会话会显示在这里。",
-    );
-    writeGroup(
       chatConversations,
-      conversations.slice(1),
-      "暂时还没有更多会话。",
+      conversations,
+      "暂时还没有会话。",
+    );
+  };
+
+  const isSupersededProcessingTurn = (turn, index, turns) =>
+    turn?.status === "processing" && index < turns.length - 1;
+
+  const mergeTurnsWithLocalPending = (conversationId, loadedTurns) => {
+    const loadedRequestIds = new Set(
+      loadedTurns.map((turn) => turn.request_id).filter(Boolean),
+    );
+    const localPendingTurns = (conversationTurnCache.get(conversationId) ?? []).filter(
+      (turn) => turn.request_id && !loadedRequestIds.has(turn.request_id),
+    );
+    return [...loadedTurns, ...localPendingTurns];
+  };
+
+  const updateCachedTurn = (targetConversationId, requestId, patch) => {
+    const cachedTurns = conversationTurnCache.get(targetConversationId);
+    if (!cachedTurns) return;
+    conversationTurnCache.set(
+      targetConversationId,
+      cachedTurns.map((turn) =>
+        turn.request_id === requestId ? { ...turn, ...patch } : turn,
+      ),
     );
   };
 
@@ -1158,13 +1534,25 @@
     }
 
     suppressMessageAutoScroll = true;
-    turns.forEach((turn) => {
-      appendMessage(turn.user_message ?? "", "user");
+    turns.forEach((turn, index) => {
+      appendMessage(
+        turn.user_message ?? "",
+        "user",
+        "",
+        false,
+        turn.attachments ?? [],
+      );
       let assistantMessage;
       if (turn.status === "completed") {
         assistantMessage = appendMessage(turn.assistant_message ?? "", "assistant");
       } else if (turn.status === "failed") {
         assistantMessage = appendMessage(turn.error || "处理失败", "assistant", "error");
+      } else if (isSupersededProcessingTurn(turn, index, turns)) {
+        assistantMessage = appendMessage(
+          turn.error || "这条请求已中断，可继续发送新消息。",
+          "assistant",
+          "error",
+        );
       } else {
         assistantMessage = appendMessage(
           turn.assistant_message || "这条消息仍在处理中。",
@@ -1175,12 +1563,13 @@
       if (turn.request_id) assistantMessage.dataset.streamRequestId = turn.request_id;
     });
     suppressMessageAutoScroll = false;
-    messages.scrollTop = 0;
+    scrollConversationToBottom();
   };
 
   const updateComposerState = () => {
     const busy = (!conversationId && creatingConversation) ||
-      (conversationId && pendingConversationIds.has(conversationId));
+      (conversationId && pendingConversationIds.has(conversationId)) ||
+      pendingAttachments.some((attachment) => attachment.loading);
     sendButton.disabled =
       !currentUser || busy || (!chatInput.value.trim() && !pendingAttachments.length);
   };
@@ -1202,22 +1591,80 @@
     clearPendingAttachments();
     conversationId = id;
     assistantView = "chat";
+    window.sessionStorage.setItem(assistantViewStateKey, assistantView);
+    window.sessionStorage.setItem(conversationStateKey, id);
     updateAssistantButtons();
     renderConversationGroups();
     const currentConversation = conversations.find((item) => item.id === id);
     conversationHeading.textContent = summarizeTitle(currentConversation);
-    messages.innerHTML = '<div class="thread-empty">??????...</div>';
+    const cachedTurns = conversationTurnCache.get(id);
+    if (cachedTurns) {
+      renderTurns(cachedTurns);
+    } else {
+      messages.innerHTML = '<div class="thread-empty">正在加载会话...</div>';
+    }
+    renderConversationStream(id, true);
     try {
       const result = await request(`/v1/conversations/${id}/messages`);
       if (loadVersion !== conversationLoadVersion || conversationId !== id) return;
-      renderTurns(result.messages ?? []);
+      const loadedTurns = mergeTurnsWithLocalPending(id, result.messages ?? []);
+      conversationTurnCache.set(id, loadedTurns);
+      renderTurns(loadedTurns);
+      const resumableTurn = [...loadedTurns]
+        .reverse()
+        .find(
+          (turn, reverseIndex) =>
+            turn.request_id &&
+            turn.status === "processing" &&
+            !isSupersededProcessingTurn(
+              turn,
+              loadedTurns.length - 1 - reverseIndex,
+              loadedTurns,
+            ),
+        );
+      const currentStream = conversationStreams.get(id);
+      if (
+        resumableTurn &&
+        !resumedMessageJobs.has(resumableTurn.request_id) &&
+        !["pending", "finishing"].includes(currentStream?.status)
+      ) {
+        void resumeConversationJob(id, resumableTurn.request_id);
+      }
+      const activeStream = conversationStreams.get(id);
+      const activeTurnIndex = loadedTurns.findIndex(
+        (turn) => turn.request_id && turn.request_id === activeStream?.requestId,
+      );
+      const activeTurn = activeTurnIndex >= 0 ? loadedTurns[activeTurnIndex] : null;
+      const activeTurnIsStillCurrent =
+        activeTurn?.status === "processing" &&
+        !isSupersededProcessingTurn(activeTurn, activeTurnIndex, loadedTurns);
+      const activeTurnIsKnownStale =
+        activeTurn && activeTurn.status !== "processing";
+      const activeTurnWasSuperseded =
+        activeTurn && isSupersededProcessingTurn(activeTurn, activeTurnIndex, loadedTurns);
+      const activeStreamAlreadyEndedWithoutTurn =
+        !activeTurn && ["completed", "failed"].includes(activeStream?.status);
+      if (
+        activeStream &&
+        !activeTurnIsStillCurrent &&
+        (activeTurnIsKnownStale || activeTurnWasSuperseded || activeStreamAlreadyEndedWithoutTurn)
+      ) {
+        cancelStreamAnimation(activeStream.requestId);
+        conversationStreams.delete(id);
+        pendingConversationIds.delete(id);
+        updateComposerState();
+        renderConversationGroups();
+        return;
+      }
       renderConversationStream(id, false);
       if (conversationStreams.get(id)?.status !== "pending") {
         conversationStreams.delete(id);
       }
     } catch (error) {
       if (loadVersion !== conversationLoadVersion || conversationId !== id) return;
-      messages.innerHTML = `<div class="thread-empty">???????${error.message}</div>`;
+      if (!conversationTurnCache.has(id) && !conversationStreams.has(id)) {
+        messages.innerHTML = `<div class="thread-empty">读取会话失败：${error.message}</div>`;
+      }
     }
   };
 
@@ -1226,6 +1673,8 @@
     clearPendingAttachments();
     conversationId = null;
     assistantView = "chat";
+    window.sessionStorage.setItem(assistantViewStateKey, assistantView);
+    window.sessionStorage.removeItem(conversationStateKey);
     updateAssistantButtons();
     conversationHeading.textContent = "新建会话";
     renderConversationGroups();
@@ -1237,18 +1686,27 @@
   async function submitMessage(rawText) {
     const text = rawText.trim();
     const attachments = [...pendingAttachments];
+    if (attachments.some((attachment) => attachment.loading)) return;
     if ((!text && !attachments.length) || !currentUser) return;
     if ((!conversationId && creatingConversation) || pendingConversationIds.has(conversationId)) {
       return;
     }
 
     assistantView = "chat";
+    window.sessionStorage.setItem(assistantViewStateKey, assistantView);
     updateAssistantButtons();
     const messageText = text || "请分析我上传的附件。";
-    appendMessage(`${messageText}${attachmentSummary(attachments)}`, "user");
+    const userMessage = appendMessage(
+      text,
+      "user",
+      "",
+      false,
+      displayAttachments(attachments),
+    );
     const waiting = appendMessage("正在查询智能体…", "assistant", "waiting");
     const requestId = createRequestId();
     waiting.dataset.streamRequestId = requestId;
+    scrollPromptToReadingPosition(userMessage);
     let targetConversationId = conversationId;
 
     chatInput.value = "";
@@ -1265,12 +1723,25 @@
       });
       targetConversationId = created.id;
       conversationId = created.id;
+      window.sessionStorage.setItem(conversationStateKey, created.id);
       creatingConversation = false;
       conversations = [created, ...conversations.filter((item) => item.id !== created.id)];
       renderConversationGroups();
     }
 
     pendingConversationIds.add(targetConversationId);
+    const optimisticTurn = {
+      request_id: requestId,
+      user_message: text,
+      attachments: displayAttachments(attachments),
+      assistant_message: "",
+      status: "processing",
+      error: null,
+    };
+    conversationTurnCache.set(targetConversationId, [
+      ...(conversationTurnCache.get(targetConversationId) ?? []),
+      optimisticTurn,
+    ]);
     conversationStreams.set(targetConversationId, {
       requestId,
       status: "pending",
@@ -1286,43 +1757,36 @@
     updateComposerState();
     try {
       let streamCompleted = false;
-      await streamRequest(
-        `/v1/conversations/${targetConversationId}/messages/stream`,
+      await runMessageJobRequest(
+        `/v1/conversations/${targetConversationId}/message-jobs`,
         {
           message: messageText,
-          attachments: serializeAttachments(attachments),
+          display_message: text,
+          attachment_upload_ids: attachments.map((attachment) => attachment.uploadId),
           request_id: requestId,
         },
         async (event) => {
-          const state = conversationStreams.get(targetConversationId);
-          if (!state || state.requestId !== requestId) return;
-          if (event.type === "delta") {
-            enqueueConversationDelta(
+          streamCompleted =
+            (await applyConversationJobEvent(
               targetConversationId,
               requestId,
-              event.text || "",
-            );
-          }
-          if (event.type === "final") {
-            streamCompleted = true;
-            await finishConversationStream(
-              targetConversationId,
-              requestId,
-              event.answer || state.receivedText,
-            );
-          }
-          if (event.type === "error") {
-            throw new Error(event.error || "Agent stream failed");
-          }
+              event,
+            )) || streamCompleted;
         },
       );
       const state = conversationStreams.get(targetConversationId);
       if (!streamCompleted && state?.text) {
+        const finalAnswer = state.receivedText || state.text;
         await finishConversationStream(
           targetConversationId,
           requestId,
-          state.receivedText || state.text,
+          finalAnswer,
         );
+        updateCachedTurn(targetConversationId, requestId, {
+          assistant_message: finalAnswer,
+          status: "completed",
+          error: null,
+        });
       }
       await refreshConversations();
     } catch (error) {
@@ -1333,6 +1797,13 @@
         state.status = "failed";
         state.error =
           error.status === 401 ? "登录已失效，请重新登录。" : `请求失败：${error.message}`;
+        if (error.jobFailed) {
+          updateCachedTurn(targetConversationId, requestId, {
+            assistant_message: "",
+            status: "failed",
+            error: state.error,
+          });
+        }
         renderConversationStream(targetConversationId);
       }
       if (error.status === 401) showLogin();
@@ -1356,14 +1827,25 @@
           </div>
         </div>
         <div class="schedule-meta">
-          <div><span>默认规则</span><b>${template.schedule_type === "one_off" ? "一次性" : template.recurrence_kind === "daily" ? "每天" : template.recurrence_kind === "weekdays" ? "工作日" : "每周"}</b></div>
+          <div><span>默认规则</span><b>${template.recurrence_kind === "daily" ? "每天" : template.recurrence_kind === "weekdays" ? "工作日" : "每周"}</b></div>
           <div><span>推荐时间</span><b>${String(template.hour).padStart(2, "0")}:${String(template.minute).padStart(2, "0")}</b></div>
         </div>
         <div class="template-card-actions">
           <button type="button" class="primary-inline">使用此安排</button>
         </div>
       `;
-      article.querySelector("button").addEventListener("click", () => openScheduleModal(template));
+      article.querySelector("button").addEventListener("click", () => {
+        if (template.key === "daily-email-report") {
+          pendingStepUpTemplate = template;
+          emailScheduleReauthToken = null;
+          stepUpPassword.value = "";
+          stepUpError.textContent = "";
+          stepUpModal.hidden = false;
+          window.setTimeout(() => stepUpPassword.focus(), 50);
+          return;
+        }
+        openScheduleModal(template);
+      });
       scheduleTemplates.append(article);
     });
   };
@@ -1429,6 +1911,7 @@
                 });
                 await refreshConversations();
                 assistantView = "chat";
+                window.sessionStorage.setItem(assistantViewStateKey, assistantView);
                 updateAssistantButtons();
                 await openConversation(targetConversationId);
                 return;
@@ -1504,41 +1987,18 @@
     renderSchedules();
   };
 
-  const toLocalDateTimeInputValue = (date) => {
-    const pad = (value) => String(value).padStart(2, "0");
-    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  };
-
-  const nextOneOffDateTime = (hour = 9, minute = 0) => {
-    const nextRun = new Date();
-    nextRun.setDate(nextRun.getDate() + 1);
-    nextRun.setHours(hour, minute, 0, 0);
-    return toLocalDateTimeInputValue(nextRun);
-  };
-
   const syncScheduleFields = () => {
-    const recurring = scheduleType.value === "recurring";
     const emailSchedule = scheduleTemplateKey.value.includes("email");
-    recurrenceKindField.hidden = !recurring;
-    timeField.hidden = !recurring;
-    oneOffField.hidden = recurring;
-    weekdayField.hidden = !recurring || scheduleRecurrenceKind.value !== "weekly";
-    scheduleTime.required = recurring;
-    scheduleDateTime.required = !recurring;
+    recurrenceKindField.hidden = false;
+    timeField.hidden = false;
+    weekdayField.hidden = scheduleRecurrenceKind.value !== "weekly";
+    scheduleTime.required = true;
     emailRecipientField.hidden = !emailSchedule;
+    emailSenderField.hidden = !emailSchedule;
+    emailAuthCodeField.hidden = !emailSchedule;
     scheduleEmailRecipient.required = emailSchedule;
+    scheduleSenderAuthCode.required = emailSchedule && !currentUser?.mail_auth_configured;
 
-    if (!recurring) {
-      const now = new Date();
-      scheduleDateTime.min = toLocalDateTimeInputValue(now);
-      if (!scheduleDateTime.value) {
-        const [hour, minute] = scheduleTime.value.split(":").map(Number);
-        scheduleDateTime.value = nextOneOffDateTime(
-          Number.isNaN(hour) ? 9 : hour,
-          Number.isNaN(minute) ? 0 : minute,
-        );
-      }
-    }
   };
 
   const openScheduleModal = (source = null) => {
@@ -1548,6 +2008,11 @@
     scheduleModal.hidden = false;
     scheduleEnvironment.value = "bank-runtime";
     scheduleConversation.value = "new";
+    scheduleSenderEmail.value = currentUser?.email || "";
+    scheduleSenderAuthCode.value = "";
+    emailAuthCodeHint.textContent = currentUser?.mail_auth_configured
+      ? "已安全保存授权码；如需更换可重新输入，否则留空。"
+      : "首次创建邮件安排时需填写，授权码会加密保存。";
 
     if (source?.id) {
       scheduleModalTitle.textContent = "编辑安排";
@@ -1558,13 +2023,9 @@
       scheduleName.value = source.name;
       scheduleDescription.value = source.description || "";
       schedulePrompt.value = source.prompt;
-      scheduleType.value = source.schedule_type;
       scheduleRecurrenceKind.value = source.recurrence_kind || "daily";
       scheduleWeekday.value = String(source.weekday ?? 1);
       scheduleTime.value = `${String(source.hour).padStart(2, "0")}:${String(source.minute).padStart(2, "0")}`;
-      scheduleDateTime.value = source.scheduled_for
-        ? toLocalDateTimeInputValue(new Date(source.scheduled_for))
-        : "";
       scheduleEmailRecipient.value = source.recipient_email || "";
     } else {
       const template = source?.key ? source : null;
@@ -1576,14 +2037,9 @@
       scheduleName.value = template?.name ?? "";
       scheduleDescription.value = template?.description ?? "";
       schedulePrompt.value = template?.prompt ?? "";
-      scheduleType.value = template?.schedule_type ?? "recurring";
       scheduleRecurrenceKind.value = template?.recurrence_kind ?? "daily";
       scheduleWeekday.value = String(template?.weekday ?? 1);
       scheduleTime.value = `${String(template?.hour ?? 9).padStart(2, "0")}:${String(template?.minute ?? 0).padStart(2, "0")}`;
-      scheduleDateTime.value =
-        template?.schedule_type === "one_off"
-          ? nextOneOffDateTime(template?.hour ?? 10, template?.minute ?? 0)
-          : "";
       scheduleEmailRecipient.value = "";
     }
 
@@ -1596,7 +2052,7 @@
 
   const schedulePayload = () => {
     const [hour, minute] = scheduleTime.value.split(":").map(Number);
-    return {
+    const payload = {
       name: scheduleName.value.trim(),
       description: scheduleDescription.value.trim(),
       prompt: schedulePrompt.value.trim(),
@@ -1619,28 +2075,36 @@
             : scheduleTemplateKey.value.includes("weekday")
               ? "gold"
               : "blue",
-      schedule_type: scheduleType.value,
-      recurrence_kind: scheduleType.value === "recurring" ? scheduleRecurrenceKind.value : null,
+      schedule_type: "recurring",
+      recurrence_kind: scheduleRecurrenceKind.value,
       weekday:
-        scheduleType.value === "recurring" && scheduleRecurrenceKind.value === "weekly"
+        scheduleRecurrenceKind.value === "weekly"
           ? Number(scheduleWeekday.value)
           : null,
       hour: Number.isNaN(hour) ? 9 : hour,
       minute: Number.isNaN(minute) ? 0 : minute,
-      scheduled_for:
-        scheduleType.value === "one_off" && scheduleDateTime.value
-          ? new Date(scheduleDateTime.value).toISOString()
-          : null,
+      scheduled_for: null,
       recipient_email: scheduleTemplateKey.value.includes("email")
         ? scheduleEmailRecipient.value.trim()
         : null,
       timezone: "Asia/Shanghai",
       enabled: true,
     };
+    if (scheduleTemplateKey.value === "daily-email-report" && !scheduleId.value) {
+      payload.reauth_token = emailScheduleReauthToken;
+    }
+    if (
+      scheduleTemplateKey.value.includes("email") &&
+      scheduleSenderAuthCode.value.trim()
+    ) {
+      payload.sender_auth_code = scheduleSenderAuthCode.value.trim();
+    }
+    return payload;
   };
 
   const showPage = async (page) => {
     currentPage = page;
+    window.sessionStorage.setItem(pageStateKey, page);
     const assistant = page === "assistant";
     const infrastructure = page === "infrastructure";
     const vendorDirectory = page === "vendors";
@@ -1670,8 +2134,19 @@
     appShell.hidden = false;
     updateHeader();
     resetChatMessages();
-    await loadSkills();
-    await showPage("infrastructure");
+    void loadSkills().catch(() => {
+      skills = [];
+    });
+    await showPage(currentPage);
+    if (currentPage === "assistant" && assistantView === "chat") {
+      const restoredConversationId = window.sessionStorage.getItem(conversationStateKey);
+      if (
+        restoredConversationId &&
+        conversations.some((conversation) => conversation.id === restoredConversationId)
+      ) {
+        await openConversation(restoredConversationId);
+      }
+    }
   };
 
   function showLogin() {
@@ -1686,7 +2161,8 @@
     conversationId = null;
     creatingConversation = false;
     clearPendingAttachments();
-    setTimeout(() => username.focus(), 50);
+    closeAccountMenu();
+    setTimeout(() => loginIdentifier.focus(), 50);
   }
 
   loginForm.addEventListener("submit", async (event) => {
@@ -1698,7 +2174,7 @@
       const result = await request("/v1/auth/login", {
         method: "POST",
         body: JSON.stringify({
-          username: username.value,
+          identifier: loginIdentifier.value,
           password: password.value,
         }),
       });
@@ -1719,18 +2195,38 @@
     event.currentTarget.textContent = reveal ? "隐藏" : "显示";
   });
 
-  document.querySelectorAll("[data-demo-user]").forEach((button) => {
+  document.querySelectorAll("[data-demo-identifier]").forEach((button) => {
     button.addEventListener("click", () => {
-      username.value = button.dataset.demoUser;
-      password.value = "LettaDemo@2026";
+      loginIdentifier.value = button.dataset.demoIdentifier;
+      password.value = "";
       loginError.textContent = "";
-      loginButton.focus();
+      password.focus();
     });
   });
 
   document.querySelector("#logoutButton").addEventListener("click", async () => {
     await request("/v1/auth/logout", { method: "POST", body: "{}" }).catch(() => null);
+    window.sessionStorage.removeItem(pageStateKey);
+    window.sessionStorage.removeItem(assistantViewStateKey);
+    window.sessionStorage.removeItem(conversationStateKey);
     showLogin();
+  });
+
+  accountMenuButton.addEventListener("click", () => {
+    const opening = accountMenu.hidden;
+    accountMenu.hidden = !opening;
+    accountMenuButton.setAttribute("aria-expanded", String(opening));
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".account-menu-wrap")) closeAccountMenu();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !accountMenu.hidden) {
+      closeAccountMenu();
+      accountMenuButton.focus();
+    }
   });
 
   document.querySelector("#selectAllDatacenters").addEventListener("click", () => {
@@ -1768,20 +2264,13 @@
 
   assistantSchedulesTab.addEventListener("click", async () => {
     assistantView = "schedules";
+    window.sessionStorage.setItem(assistantViewStateKey, assistantView);
     updateAssistantButtons();
     await loadSchedules();
   });
 
   assistantNewChat.addEventListener("click", () => {
     createNewConversationDraft();
-  });
-
-  chatRefreshButton.addEventListener("click", async () => {
-    if (conversationId) {
-      await openConversation(conversationId);
-    } else {
-      await refreshConversations();
-    }
   });
 
   chatComposer.addEventListener("submit", (event) => {
@@ -1901,13 +2390,48 @@
     });
   });
 
+  const closeStepUpDialog = () => {
+    stepUpModal.hidden = true;
+    stepUpPassword.value = "";
+    stepUpError.textContent = "";
+    pendingStepUpTemplate = null;
+  };
+
+  closeStepUpModal.addEventListener("click", closeStepUpDialog);
+  cancelStepUpButton.addEventListener("click", closeStepUpDialog);
+  stepUpModal.addEventListener("click", (event) => {
+    if (event.target === stepUpModal) closeStepUpDialog();
+  });
+  stepUpForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    stepUpError.textContent = "";
+    setButtonBusy(submitStepUpButton, true, "正在验证...");
+    try {
+      const result = await request("/v1/auth/step-up", {
+        method: "POST",
+        body: JSON.stringify({
+          password: stepUpPassword.value,
+          purpose: "create_daily_email_schedule",
+        }),
+      });
+      const template = pendingStepUpTemplate;
+      emailScheduleReauthToken = result.token;
+      closeStepUpDialog();
+      openScheduleModal(template);
+    } catch (error) {
+      stepUpError.textContent = error.message;
+      stepUpPassword.select();
+    } finally {
+      setButtonBusy(submitStepUpButton, false);
+    }
+  });
+
   createScheduleButton.addEventListener("click", () => openScheduleModal());
   closeScheduleModal.addEventListener("click", closeScheduleEditor);
   cancelScheduleButton.addEventListener("click", closeScheduleEditor);
   scheduleModal.addEventListener("click", (event) => {
     if (event.target === scheduleModal) closeScheduleEditor();
   });
-  scheduleType.addEventListener("change", syncScheduleFields);
   scheduleRecurrenceKind.addEventListener("change", syncScheduleFields);
 
   deleteScheduleButton.addEventListener("click", async () => {
@@ -1931,27 +2455,30 @@
     event.preventDefault();
     scheduleError.textContent = "";
 
-    if (scheduleType.value === "one_off" && !scheduleDateTime.value) {
-      scheduleError.textContent = "请选择一次安排的执行日期和时间。";
-      scheduleDateTime.focus();
-      return;
-    }
-
-    if (
-      scheduleType.value === "one_off" &&
-      new Date(scheduleDateTime.value).getTime() <= Date.now()
-    ) {
-      scheduleError.textContent = "一次安排的执行时间必须晚于当前时间。";
-      scheduleDateTime.focus();
-      return;
-    }
-
     if (
       scheduleTemplateKey.value.includes("email") &&
       !scheduleEmailRecipient.value.trim()
     ) {
       scheduleError.textContent = "请输入收件人的邮箱地址。";
       scheduleEmailRecipient.focus();
+      return;
+    }
+
+    if (
+      scheduleTemplateKey.value.includes("email") &&
+      !currentUser?.email
+    ) {
+      scheduleError.textContent = "当前账号尚未绑定发件邮箱。";
+      return;
+    }
+
+    if (
+      scheduleTemplateKey.value.includes("email") &&
+      !currentUser?.mail_auth_configured &&
+      !scheduleSenderAuthCode.value.trim()
+    ) {
+      scheduleError.textContent = "请输入当前发件邮箱的授权码。";
+      scheduleSenderAuthCode.focus();
       return;
     }
 
@@ -1972,16 +2499,39 @@
           method: "POST",
           body: JSON.stringify(payload),
         });
+        if (payload.reauth_token) emailScheduleReauthToken = null;
+      }
+      if (payload.sender_auth_code) {
+        currentUser.mail_auth_configured = true;
+        updateHeader();
       }
       closeScheduleEditor();
       await loadSchedules();
     } catch (error) {
-      scheduleError.textContent = error.message.includes("scheduled_for")
-        ? "请选择一次安排的执行日期和时间。"
-        : error.message;
+      scheduleError.textContent = error.message;
     } finally {
       setButtonBusy(submitScheduleButton, false);
     }
+  });
+
+  window.addEventListener("pagehide", () => {
+    pageIsUnloading = true;
+    activeAttachmentReaders.forEach((reader) => {
+      if (reader.readyState === FileReader.LOADING) reader.abort();
+    });
+    activeAttachmentRequests.forEach((xhr) => {
+      if (xhr.readyState !== XMLHttpRequest.DONE) xhr.abort();
+    });
+    pendingAttachments.forEach((attachment) => {
+      attachment.previewUrl = null;
+    });
+    pendingAttachments = [];
+    activeAttachmentReaders.clear();
+    activeAttachmentRequests.clear();
+  });
+
+  window.addEventListener("pageshow", () => {
+    pageIsUnloading = false;
   });
 
   request("/v1/auth/me")

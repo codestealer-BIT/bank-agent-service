@@ -18,10 +18,35 @@ machine inventory dashboard, and floating chat widget.
   and Data Sources/Folders ingestion.
 - Strict serialization inside one conversation through a Redis distributed lock.
 - Parallel execution across different conversations, with a global concurrency cap (default 32).
+- Transient model failures retry MiniMax briefly, then fail over through the configured LiteLLM backup models.
 - Persistent local Docker volumes; no Letta Constellation login or cloud MemFS sync.
 - Idempotent message requests through `request_id`.
 
 The included login is for local demonstrations. A bank deployment must replace it with the bank's verified SSO/OIDC identity, HTTPS, MFA policy, centralized audit, and secret management.
+
+## LiteLLM model failover
+
+MiniMax is the primary model. By default, a transient timeout, connection error,
+rate limit, or upstream 5xx failure retries MiniMax once and then tries
+`Kimi-K3`, `GLM-5.2`, and `Kimi-K2.7-Code` in order. Invalid requests,
+authentication failures, context-limit errors, and other deterministic 4xx
+responses fail immediately so that limited fallback quota is not wasted.
+
+```dotenv
+LITELLM_MODEL=MiniMax-M3
+LITELLM_FALLBACK_MODELS=Kimi-K3,GLM-5.2,Kimi-K2.7-Code
+AGENT_PRIMARY_ATTEMPTS=2
+AGENT_FALLBACK_ATTEMPTS=1
+AGENT_FAILOVER_BACKOFF_BASE_MS=500
+AGENT_FAILOVER_BACKOFF_MAX_MS=8000
+```
+
+The same policy covers normal chat, streaming chat, scheduled turns, and memory
+reflection. A streaming turn only fails over before visible answer text reaches
+the client; after that point it returns the error instead of concatenating two
+different model responses. A turn also stops failover after a successful email,
+memory write, or knowledge-candidate submission so that replay cannot duplicate
+an external side effect.
 
 ## Start
 
@@ -41,10 +66,10 @@ that container is ready.
 
 Default local demo accounts (unless changed through `.env`):
 
-| Account | Display name | Password |
-|---|---|---|
-| `usera` | 顾彦航 | `LettaDemo@2026` |
-| `userb` | 林清禾 | `LettaDemo@2026` |
+| Account | Display name | Bound email | Password |
+|---|---|---|---|
+| `usera` | 顾彦航 | `813624374@qq.com` | `GuYanHang@2026!47` |
+| `userb` | 林清和 | `2113950574@qq.com` | `LinQingHe@2026!83` |
 
 These map to the existing internal identities `demo-user-a` and `demo-user-b`, so their previous Agent IDs and MemFS repositories remain available.
 
@@ -54,11 +79,16 @@ Normal chat turns use one shared long-term memory path:
 
 - Before each model turn, the backend chunks changed shared MemFS Markdown,
   embeds it with the locally hosted BGE-M3 model, and searches pgvector by
-  cosine similarity. Relevant organization-wide facts, plans, policies,
-  procedures, and operations knowledge are injected into the turn context.
-- During the turn, the model may call `memory_save` when it identifies a durable bank-wide fact, confirmed plan, policy, procedure, or verified reusable operations lesson.
+  cosine similarity. Relevant verified bank infrastructure or IT operations
+  lessons and confirmed long-lived bank operations rules are injected into the
+  turn context.
+- During the turn, the model may call `memory_save` only for a verified reusable
+  bank operations lesson (`bank_operations_lesson`) or a confirmed long-lived
+  bank operations regulation, policy, standard, or procedure
+  (`bank_operations_policy`). General research, competition materials,
+  due-diligence analysis, business plans, KPIs, and transient states are excluded.
 
-The background reflection worker is enabled by default. It scans completed turns every `MEMORY_REFLECTION_POLL_MS` milliseconds and asks the same agent to decide whether anything should be written to shared MemFS. Parsed attachment results are stored as structured JSON in `turns.attachment_context` and are reviewed in the same chronological position as their original turn; attachment text in the reflection prompt is capped even though the persisted parser output is retained. Personal preferences, identity facts, private discussions, customer data, credentials, and raw transcripts are not stored as long-term memory. Conversation history remains isolated by authenticated user and conversation.
+The background reflection worker is enabled by default. It scans completed turns every `MEMORY_REFLECTION_POLL_MS` milliseconds and applies the same two-category bank-operations-only policy before writing shared MemFS. Parsed attachment results are stored as structured JSON in `turns.attachment_context` and are reviewed in the same chronological position as their original turn; attachment text in the reflection prompt is capped even though the persisted parser output is retained. Personal preferences, identity facts, private discussions, customer data, credentials, raw transcripts, and material unrelated to bank infrastructure or IT operations are not stored as long-term memory. Conversation history remains isolated by authenticated user and conversation.
 
 Useful knobs:
 
@@ -82,10 +112,10 @@ embedding provider with the default Compose configuration.
 
 The recommended schedule named `每日运维邮件` asks the Agent to query the
 infrastructure tools and then call the controlled `send_email` tool. The user
-enters the recipient in the schedule form; the backend binds it to that schedule.
-The model can set only the subject and plain-text body and cannot change the
-recipient. Sender credentials remain in the backend environment and are never
-exposed to the model.
+enters the recipient and, when needed, the current account's SMTP authorization
+code. The sender comes from the authenticated user's profile. Neither sender nor
+recipient can be changed by the model. Authorization codes are encrypted with
+AES-256-GCM and are never returned by the API or exposed to the model.
 
 Enable POP3/IMAP/SMTP in QQ Mail, generate a 16-character authorization code,
 then add the following values to `.env`:
@@ -99,7 +129,14 @@ SMTP_USER=your-account@qq.com
 SMTP_AUTH_CODE=your-16-character-authorization-code
 SMTP_DEFAULT_TO=optional-fallback-recipient@example.com
 SMTP_FROM_NAME=澄川智能运维助手
+MAIL_CREDENTIAL_ENCRYPTION_KEY=replace-with-a-random-32-byte-base64-key
 ```
+
+Generate the encryption key with
+`node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`.
+The legacy `SMTP_USER` and `SMTP_AUTH_CODE` values are imported for demo User A
+on startup. User B supplies its own authorization code in the email schedule
+form.
 
 Use the QQ authorization code, not the QQ login password. Restart the API after
 changing `.env`:
@@ -118,7 +155,7 @@ $login = Invoke-RestMethod `
   -Uri http://localhost:8080/v1/auth/login `
   -SessionVariable bankSession `
   -ContentType "application/json" `
-  -Body '{"username":"usera","password":"LettaDemo@2026"}'
+  -Body '{"identifier":"813624374@qq.com","password":"GuYanHang@2026!47"}'
 
 $conversation = Invoke-RestMethod `
   -Method Post `

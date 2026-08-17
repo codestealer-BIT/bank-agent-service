@@ -14,11 +14,14 @@ components:
   schemas:
     User:
       type: object
-      required: [id, username, display_name]
+      required: [id, username, display_name, email, phone, mail_auth_configured]
       properties:
         id: { type: string }
         username: { type: string }
         display_name: { type: string }
+        email: { type: [string, "null"], format: email }
+        phone: { type: [string, "null"] }
+        mail_auth_configured: { type: boolean }
     Conversation:
       type: object
       required: [id, user_id, created_at, updated_at]
@@ -63,9 +66,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [username, password]
+              required: [identifier, password]
               properties:
-                username: { type: string }
+                identifier:
+                  type: string
+                  description: Username, bound email address, or bound phone number.
                 password: { type: string, format: password }
       responses:
         "200": { description: Authenticated; sets an HttpOnly session cookie }
@@ -77,6 +82,25 @@ paths:
       responses:
         "200": { description: Current user }
         "401": { description: Authentication required }
+  /v1/auth/step-up:
+    post:
+      summary: Re-enter the current login password to obtain a short-lived one-time authorization token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, purpose]
+              properties:
+                password: { type: string, format: password }
+                purpose:
+                  type: string
+                  enum: [create_daily_email_schedule]
+      responses:
+        "200": { description: Five-minute, single-use authorization token }
+        "401": { description: Invalid password }
+        "429": { description: Too many attempts }
   /v1/auth/logout:
     post:
       summary: Revoke the current session

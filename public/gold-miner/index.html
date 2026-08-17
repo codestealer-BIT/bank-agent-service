@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gold Miner</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="game-shell">
+      <section class="topbar" aria-label="Game status">
+        <div>
+          <span class="label">Score</span>
+          <strong id="score">$0</strong>
+        </div>
+        <div>
+          <span class="label">Goal</span>
+          <strong id="goal">$650</strong>
+        </div>
+        <div>
+          <span class="label">Time</span>
+          <strong id="time">60</strong>
+        </div>
+        <div>
+          <span class="label">Level</span>
+          <strong id="level">1</strong>
+        </div>
+      </section>
+
+      <section class="canvas-wrap">
+        <canvas id="game" width="960" height="640" aria-label="Gold Miner game canvas"></canvas>
+        <div id="overlay" class="overlay">
+          <h1>Gold Miner</h1>
+          <p>Press Space, click, or tap to drop the claw.</p>
+          <button id="startButton" type="button">Start Game</button>
+        </div>
+      </section>
+
+      <section class="controls" aria-label="Controls">
+        <button id="dropButton" type="button">Drop Claw</button>
+        <button id="restartButton" type="button">Restart</button>
+      </section>
+    </main>
+
+    <script src="./game.js"></script>
+  </body>
+</html>

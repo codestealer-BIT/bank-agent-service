@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0d1733" />
     <title>澄川银行 | 智能运维台</title>
     <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.18.1" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260813-step-up" />
   </head>
   <body>
     <section id="authGate" class="auth-shell" aria-labelledby="loginTitle">
@@ -36,12 +36,12 @@
           <h2 id="loginTitle">登录智能运维台</h2>
           <p class="login-lead">使用演示账号进入基础设施资产与智能运维工作台</p>
           <form id="loginForm" novalidate>
-            <label for="username">登录账号</label>
+            <label for="loginIdentifier">邮箱 / 手机号 / 用户名</label>
             <input
-              id="username"
-              name="username"
+              id="loginIdentifier"
+              name="identifier"
               autocomplete="username"
-              placeholder="请输入账号"
+              placeholder="请输入邮箱、手机号或用户名"
               required
             />
             <label for="password">登录密码</label>
@@ -64,10 +64,10 @@
           <div class="demo-access">
             <p>演示账号</p>
             <div class="demo-users">
-              <button type="button" data-demo-user="usera"><span>A</span><b>User A</b></button>
-              <button type="button" data-demo-user="userb"><span>B</span><b>User B</b></button>
+              <button type="button" data-demo-identifier="813624374@qq.com"><span>顾</span><b>顾彦航</b></button>
+              <button type="button" data-demo-identifier="2113950574@qq.com"><span>林</span><b>林清和</b></button>
             </div>
-            <small>默认密码：<code>LettaDemo@2026</code></small>
+            <small>支持使用绑定邮箱、手机号或用户名登录</small>
           </div>
         </div>
       </div>
@@ -100,9 +100,25 @@
         <header class="main-header">
           <div class="account-area">
             <span class="live-pill"><i></i> 数据服务在线</span>
-            <span id="headerAvatar" class="avatar">顾</span>
-            <span class="account-copy"><b id="headerName">用户</b><small id="headerUsername">@user</small></span>
-            <button id="logoutButton" class="logout-button" type="button">退出</button>
+            <div class="account-menu-wrap">
+              <button id="accountMenuButton" class="account-menu-button" type="button" aria-haspopup="menu" aria-expanded="false">
+                <span id="headerAvatar" class="avatar">顾</span>
+                <span class="account-copy"><b id="headerName">用户</b><small id="headerUsername">user@example.com</small></span>
+                <span class="account-chevron" aria-hidden="true">⌄</span>
+              </button>
+              <section id="accountMenu" class="account-menu" role="menu" hidden>
+                <div class="account-menu-identity">
+                  <span id="profileAvatar" class="avatar">顾</span>
+                  <div><strong id="profileName">用户</strong><small id="profileUsername">@user</small></div>
+                </div>
+                <dl class="profile-details">
+                  <div><dt>邮箱</dt><dd id="profileEmail">—</dd></div>
+                  <div><dt>手机号</dt><dd id="profilePhone">—</dd></div>
+                  <div><dt>发件授权</dt><dd id="profileMailStatus">未配置</dd></div>
+                </dl>
+                <button id="logoutButton" class="account-logout-button" type="button" role="menuitem">退出登录</button>
+              </section>
+            </div>
           </div>
         </header>
 
@@ -188,7 +204,6 @@
           <section id="vendorsPage" class="page-section vendors-page" hidden>
             <section class="vendor-hero">
               <div>
-                <span class="section-eyebrow">MAINTENANCE PARTNERS</span>
                 <h1>维保厂商信息</h1>
                 <p>统一查看基础设施维保单位、服务范围与应急联系人。</p>
               </div>
@@ -238,10 +253,6 @@
 
                 <div class="conversation-groups">
                   <section>
-                    <h3>置顶会话</h3>
-                    <div id="pinnedConversations" class="conversation-list"></div>
-                  </section>
-                  <section>
                     <h3>历史会话</h3>
                     <div id="chatConversations" class="conversation-list"></div>
                   </section>
@@ -255,7 +266,6 @@
                       <span class="eyebrow">专属会话</span>
                       <h2 id="conversationHeading">智能运维会话</h2>
                     </div>
-                    <button id="chatRefreshButton" class="ghost-button" type="button">刷新历史</button>
                   </div>
 
                   <div id="messages" class="messages"></div>
@@ -269,6 +279,7 @@
                       </div>
                       <div id="skillPaletteList" class="skill-palette-list"></div>
                     </div>
+                    <p class="hint">演示环境，重要操作仍需人工确认。</p>
                     <form id="chatComposer" class="composer">
                       <input
                         id="attachmentInput"
@@ -298,7 +309,6 @@
                       ></textarea>
                       <button id="sendButton" class="send" aria-label="发送" type="submit">↑</button>
                     </form>
-                    <p class="hint">演示环境，重要操作仍需人工确认。</p>
                   </div>
                 </div>
 
@@ -307,7 +317,6 @@
                     <div class="schedule-tabs">
                       <button class="schedule-tab active" data-filter="all" type="button">全部</button>
                       <button class="schedule-tab" data-filter="recurring" type="button">定期安排</button>
-                      <button class="schedule-tab" data-filter="one_off" type="button">一次安排</button>
                     </div>
                     <button id="createScheduleButton" class="ghost-button" type="button">
                       + 新建安排
@@ -387,14 +396,6 @@
               </select>
             </label>
 
-            <label class="schedule-field">
-              <span>任务类型</span>
-              <select id="scheduleType">
-                <option value="recurring">定期安排</option>
-                <option value="one_off">一次安排</option>
-              </select>
-            </label>
-
             <label id="recurrenceKindField" class="schedule-field">
               <span>重复规则</span>
               <select id="scheduleRecurrenceKind">
@@ -422,11 +423,6 @@
               <input id="scheduleTime" type="time" value="09:00" required />
             </label>
 
-            <label id="oneOffField" class="schedule-field schedule-field-wide" hidden>
-              <span>执行日期时间</span>
-              <input id="scheduleDateTime" type="datetime-local" />
-            </label>
-
             <label id="emailRecipientField" class="schedule-field schedule-field-wide" hidden>
               <span>收件邮箱</span>
               <input
@@ -437,6 +433,25 @@
                 placeholder="例如：operations@example.com"
               />
               <small>该地址只绑定到当前邮件安排，智能体无法在执行时修改。</small>
+            </label>
+
+            <label id="emailSenderField" class="schedule-field schedule-field-wide" hidden>
+              <span>发件邮箱</span>
+              <input id="scheduleSenderEmail" type="email" readonly />
+              <small>发件邮箱来自当前登录账号，不能在日程中修改。</small>
+            </label>
+
+            <label id="emailAuthCodeField" class="schedule-field schedule-field-wide" hidden>
+              <span>发件邮箱授权码</span>
+              <input
+                id="scheduleSenderAuthCode"
+                type="password"
+                maxlength="128"
+                autocomplete="new-password"
+                spellcheck="false"
+                placeholder="请输入当前发件邮箱的 SMTP 授权码"
+              />
+              <small id="emailAuthCodeHint">授权码会加密保存，之后编辑时可留空。</small>
             </label>
           </div>
 
@@ -455,11 +470,44 @@
       </section>
     </div>
 
+    <div id="stepUpModal" class="modal-backdrop" hidden>
+      <section class="step-up-modal" aria-labelledby="stepUpModalTitle">
+        <header class="schedule-modal-head">
+          <div>
+            <h2 id="stepUpModalTitle">再次验证身份</h2>
+            <p>每日运维邮件会定时执行发信操作，请先确认是你本人。</p>
+          </div>
+          <button id="closeStepUpModal" class="icon-button" type="button">×</button>
+        </header>
+        <form id="stepUpForm" class="schedule-form">
+          <label class="schedule-field">
+            <span>登录密码</span>
+            <input
+              id="stepUpPassword"
+              type="password"
+              maxlength="256"
+              autocomplete="current-password"
+              placeholder="请再次输入当前账号的登录密码"
+              required
+            />
+            <small>验证通过后会签发一个 5 分钟内有效、仅可使用一次的安全令牌。</small>
+          </label>
+          <div id="stepUpError" class="login-error"></div>
+          <footer class="schedule-modal-actions step-up-actions">
+            <div class="modal-primary-actions">
+              <button id="cancelStepUpButton" class="ghost-button" type="button">取消</button>
+              <button id="submitStepUpButton" class="primary-dark-button" type="submit">验证并继续</button>
+            </div>
+          </footer>
+        </form>
+      </section>
+    </div>
+
     <script src="/vendor/marked.umd.js?v=17.0.3" defer></script>
     <script src="/vendor/purify.min.js?v=3.3.3" defer></script>
     <script src="/vendor/katex/katex.min.js?v=0.18.1" defer></script>
     <script src="/vendor/katex/auto-render.min.js?v=0.18.1" defer></script>
     <script src="/markdown-renderer.js?v=20260730-display-math" defer></script>
-    <script src="/app.js?v=20260729-math-rendering" defer></script>
+    <script src="/app.js?v=20260813-step-up" defer></script>
   </body>
 </html>

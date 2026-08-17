@@ -20,6 +20,29 @@ const envSchema = z.object({
     .default("postgres://bank_agent:bank_agent@postgres:5432/bank_agent"),
   REDIS_URL: z.string().default("redis://redis:6379"),
   AGENT_MODEL: z.string().default("lmstudio/MiniMax-M3"),
+  AGENT_FALLBACK_MODELS: z
+    .string()
+    .default("Kimi-K3,GLM-5.2,Kimi-K2.7-Code")
+    .transform((value) =>
+      value
+        .split(",")
+        .map((model) => model.trim())
+        .filter(Boolean),
+    ),
+  AGENT_PRIMARY_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(2),
+  AGENT_FALLBACK_ATTEMPTS: z.coerce.number().int().min(1).max(3).default(1),
+  AGENT_FAILOVER_BACKOFF_BASE_MS: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .max(30_000)
+    .default(500),
+  AGENT_FAILOVER_BACKOFF_MAX_MS: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .max(120_000)
+    .default(8_000),
   AGENT_REASONING_EFFORT: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
     .default("none"),
@@ -34,6 +57,11 @@ const envSchema = z.object({
     .int()
     .positive()
     .default(600_000),
+  LETTA_COMPACTION_THRESHOLD_BYTES: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(700_000),
   MEMORY_REFLECTION_ENABLED: z
     .enum(["true", "false"])
     .default("true")
@@ -75,6 +103,13 @@ const envSchema = z.object({
     .default("true")
     .transform((value) => value === "true"),
   DEMO_USER_PASSWORD: z.string().min(10).default("LettaDemo@2026"),
+  DEMO_USER_A_PASSWORD: z.string().min(10).default("GuYanHang@2026!47"),
+  DEMO_USER_A_EMAIL: optionalEmail,
+  DEMO_USER_A_PHONE: z.string().trim().min(6).default("13800001001"),
+  DEMO_USER_B_PASSWORD: z.string().min(10).default("LinQingHe@2026!83"),
+  DEMO_USER_B_EMAIL: optionalEmail.default("2113950574@qq.com"),
+  DEMO_USER_B_PHONE: z.string().trim().min(6).default("13800001002"),
+  MAIL_CREDENTIAL_ENCRYPTION_KEY: optionalNonEmptyString,
   SMTP_ENABLED: z
     .enum(["true", "false"])
     .default("false")

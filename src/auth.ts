@@ -1,6 +1,7 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { config } from "./config.js";
 import { pool } from "./database.js";
+import { normalizeLoginIdentifier } from "./identity.js";
 import {
   createSessionToken,
   hashSessionToken,
@@ -11,6 +12,9 @@ export type AuthenticatedUser = {
   id: string;
   username: string;
   display_name: string;
+  email: string | null;
+  phone: string | null;
+  mail_auth_configured: boolean;
 };
 
 type AccountRow = AuthenticatedUser & {
@@ -55,15 +59,25 @@ function unauthorized(): Error {
 }
 
 export async function authenticateCredentials(
-  username: string,
+  identifier: string,
   password: string,
 ): Promise<AuthenticatedUser | null> {
-  const normalized = username.trim().toLowerCase();
+  const normalized = normalizeLoginIdentifier(identifier);
   const result = await pool.query<AccountRow>(
-    `SELECT id, username, display_name, password_hash, password_salt, enabled
-     FROM user_accounts
-     WHERE username = $1`,
-    [normalized],
+    `SELECT account.id, account.username, account.display_name,
+            account.email, account.phone, account.password_hash,
+            account.password_salt, account.enabled,
+            (credential.user_id IS NOT NULL OR (
+              account.email IS NOT NULL AND $2::text IS NOT NULL
+              AND lower(account.email) = lower($2::text) AND $3::boolean
+            )) AS mail_auth_configured
+     FROM user_accounts account
+     LEFT JOIN user_mail_credentials credential ON credential.user_id = account.id
+     WHERE account.username = $1
+        OR account.email_normalized = $1
+        OR account.phone = $1
+     LIMIT 1`,
+    [normalized, config.SMTP_USER ?? null, Boolean(config.SMTP_AUTH_CODE)],
   );
   const account = result.rows[0];
   if (!account?.enabled) return null;
@@ -77,7 +91,28 @@ export async function authenticateCredentials(
     id: account.id,
     username: account.username,
     display_name: account.display_name,
+    email: account.email,
+    phone: account.phone,
+    mail_auth_configured: account.mail_auth_configured,
   };
+}
+
+export async function verifyCurrentUserPassword(
+  userId: string,
+  password: string,
+): Promise<boolean> {
+  const result = await pool.query<
+    Pick<AccountRow, "password_hash" | "password_salt" | "enabled">
+  >(
+    `SELECT password_hash, password_salt, enabled
+     FROM user_accounts
+     WHERE id = $1
+     LIMIT 1`,
+    [userId],
+  );
+  const account = result.rows[0];
+  if (!account?.enabled) return false;
+  return verifyPassword(password, account.password_salt, account.password_hash);
 }
 
 export async function createAuthenticatedSession(
@@ -118,13 +153,23 @@ export async function getAuthenticatedUser(
   if (!token) throw unauthorized();
 
   const result = await pool.query<AuthenticatedUser>(
-    `SELECT account.id, account.username, account.display_name
+    `SELECT account.id, account.username, account.display_name,
+            account.email, account.phone,
+            (credential.user_id IS NOT NULL OR (
+              account.email IS NOT NULL AND $2::text IS NOT NULL
+              AND lower(account.email) = lower($2::text) AND $3::boolean
+            )) AS mail_auth_configured
      FROM auth_sessions session
      JOIN user_accounts account ON account.id = session.user_id
+     LEFT JOIN user_mail_credentials credential ON credential.user_id = account.id
      WHERE session.token_hash = $1
        AND session.expires_at > now()
        AND account.enabled = true`,
-    [hashSessionToken(token)],
+    [
+      hashSessionToken(token),
+      config.SMTP_USER ?? null,
+      Boolean(config.SMTP_AUTH_CODE),
+    ],
   );
   const user = result.rows[0];
   if (!user) throw unauthorized();

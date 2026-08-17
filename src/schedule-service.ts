@@ -423,6 +423,7 @@ async function executePreparedScheduleTask(
       lettaConversationId: null,
       message: schedule.prompt,
       emailRecipient: schedule.recipient_email,
+      includeEmailTool: Boolean(schedule.recipient_email),
     };
     const result = onDelta
       ? await streamConversationTurn(turnInput, onDelta)

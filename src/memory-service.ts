@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { config } from "./config.js";
 import { pool } from "./database.js";
 import { embedTexts, vectorSql } from "./embedding-service.js";
 import { containsSensitiveKnowledge, normalizeTags } from "./knowledge-policy.js";
+import { isBankOperationsMemoryCategory } from "./memory-policy.js";
 
 export type MemoryScope = "shared";
 
@@ -96,9 +97,12 @@ export function chunkMemoryDocument(
   if (!body) return [];
   const overlap = Math.min(overlapChars, Math.max(0, maxChars - 1));
   const logicalBlocks = body
-    .split(/\n{2,}/)
+    .split(/\n{2,}|\n(?=- \d{4}-\d{2}-\d{2}T)/)
     .map((block) => block.trim())
     .filter(Boolean);
+  const isMemoryLedger = logicalBlocks.some((block) =>
+    /^- \d{4}-\d{2}-\d{2}T/.test(block),
+  );
   const chunks: string[] = [];
   let current = "";
 
@@ -109,6 +113,7 @@ export function chunkMemoryDocument(
   };
 
   for (const block of logicalBlocks) {
+    if (isMemoryLedger) flush();
     if (block.length > maxChars) {
       flush();
       const step = Math.max(1, maxChars - overlap);
@@ -116,6 +121,10 @@ export function chunkMemoryDocument(
         chunks.push(block.slice(start, start + maxChars).trim());
         if (start + maxChars >= block.length) break;
       }
+      continue;
+    }
+    if (isMemoryLedger) {
+      chunks.push(block);
       continue;
     }
     const candidate = current ? `${current}\n\n${block}` : block;
@@ -250,11 +259,18 @@ export async function saveMemory(input: {
   if (containsSensitiveKnowledge(content)) {
     return { saved: false, reason: "Sensitive content is not stored in memory." };
   }
+  if (!isBankOperationsMemoryCategory(input.category)) {
+    return {
+      saved: false,
+      reason:
+        "Memory category must be bank_operations_lesson or bank_operations_policy.",
+    };
+  }
 
   const path = memoryFile(input.agentId);
   await ensureMarkdownFile(
     path,
-    "Organization-wide facts, plans, policies, and reusable bank operations knowledge shared across authenticated users.",
+    "Verified reusable bank infrastructure and IT operations lessons, plus confirmed long-lived bank operations regulations, policies, standards, and procedures shared across authenticated users.",
   );
 
   const existing = await readFile(path, "utf8");
@@ -267,10 +283,10 @@ export async function saveMemory(input: {
   }
 
   const tags = normalizeTags(input.tags);
-  const category = input.category?.trim() || "general";
+  const category = input.category;
   const tagSuffix = tags.length ? ` [${tags.join(", ")}]` : "";
   const line = `- ${new Date().toISOString()} (${category})${tagSuffix}: ${content}\n`;
-  await writeFile(path, `${existing.trimEnd()}\n${line}`, "utf8");
+  await appendFile(path, `\n${line}`, "utf8");
   // Markdown remains the durable source of truth. The next retrieval rebuilds
   // changed chunks before searching, so a slow or warming embedding service
   // never delays the user-facing turn that decided to save this memory.
@@ -308,7 +324,7 @@ export async function searchMemory(input: {
       input.agentId,
       config.RAG_EMBEDDING_MODEL,
       config.RAG_MIN_SIMILARITY,
-      input.limit ?? 5,
+      input.limit ?? 12,
     ],
   );
   return result.rows.map((row) => ({
@@ -339,7 +355,12 @@ export function formatMemoryContext(snippets: MemorySnippet[]): string {
   return snippets
     .map(
       (snippet, index) =>
-        `Memory ${index + 1} (${snippet.scope}, ${snippet.path}):\n${snippet.content}`,
+        `Evidence version ${index + 1}:\n${snippet.content
+          .replace(
+            /^-\s+\d{4}-\d{2}-\d{2}T\S+\s+\([^\n)]*\)(?:\s+\[[^\n\]]*\])?:\s*/gm,
+            "",
+          )
+          .trim()}`,
     )
     .join("\n\n");
 }

@@ -9,9 +9,10 @@ import {
   infrastructureSummary,
 } from "./infrastructure.js";
 import { containsSensitiveKnowledge, normalizeTags } from "./knowledge-policy.js";
-import { sendConfiguredEmail } from "./mail-service.js";
+import { sendUserEmail } from "./mail-service.js";
+import { BANK_OPERATIONS_MEMORY_CATEGORIES } from "./memory-policy.js";
 import { saveMemory, searchMemory } from "./memory-service.js";
-import { getSkill, listSkills } from "./skill-service.js";
+import { getSkill } from "./skill-service.js";
 
 function jsonResult(value: unknown) {
   return {
@@ -57,12 +58,12 @@ const emailInput = z.object({
 
 const memorySearchInput = z.object({
   query: z.string().trim().min(1).max(1_000),
-  limit: z.number().int().min(1).max(8).optional(),
+  limit: z.number().int().min(1).max(12).optional(),
 });
 
 const memorySaveInput = z.object({
   content: z.string().trim().min(3).max(2_000),
-  category: z.string().trim().min(1).max(80).optional(),
+  category: z.enum(BANK_OPERATIONS_MEMORY_CATEGORIES),
   tags: z.array(z.string()).max(8).optional(),
 });
 
@@ -82,19 +83,23 @@ export const OPERATIONS_TOOL_NAMES = [
 export function createOperationsTools(
   userId: string,
   agentId: string,
-  options: { emailRecipient?: string | null } = {},
+  options: {
+    emailRecipient?: string | null;
+    includeEmail?: boolean;
+    onSideEffect?: (toolName: string) => void;
+  } = {},
 ): AnyAgentTool[] {
-  return [
+  const tools: AnyAgentTool[] = [
     {
       label: "Memory search",
       name: "memory_search",
       description:
-        "Search the shared MemFS used by all authenticated bank employees. Use this before answering when the question may relate to remembered organization-wide facts, plans, policies, procedures, or reusable operations knowledge.",
+        "Search the shared MemFS used by all authenticated bank employees. It contains only verified reusable bank infrastructure or IT operations lessons and confirmed long-lived bank operations regulations, policies, standards, and procedures. Use it only when those subjects are relevant.",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string" },
-          limit: { type: "integer", minimum: 1, maximum: 8 },
+          limit: { type: "integer", minimum: 1, maximum: 12 },
         },
         required: ["query"],
         additionalProperties: false,
@@ -123,27 +128,37 @@ export function createOperationsTools(
       label: "Memory save",
       name: "memory_save",
       description:
-        "Silently write a concise item to the bank-wide shared MemFS before answering when the current text or extracted attachment establishes a durable organization-wide fact, institutional strategy, KPI, confirmed plan, policy, procedure, implementation schedule, or verified reusable operations lesson. The user does not need to ask you to remember it. Never reveal that this tool was called or whether it succeeded. Do not save drafts, hypotheticals, personal information, private discussions, passwords, keys, tokens, authorization codes, customer data, or raw conversation transcripts.",
+        "Silently save only one of two kinds of durable shared memory: (1) bank_operations_lesson, a verified reusable lesson from a real bank infrastructure or IT operations situation; or (2) bank_operations_policy, a confirmed long-lived bank operations regulation, policy, standard, or procedure. The content must be directly and materially about bank infrastructure or IT operations. Never save general research or academic knowledge, papers, competition or student-project materials, due-diligence or investment analysis, product pitches, business strategy or KPI, credit or financing analysis, generic AI/data/security advice, plans, schedules, forecasts, transient tool failures, configuration gaps, one-off states, drafts, hypotheticals, personal information, private discussions, credentials, customer data, or raw transcripts. Do not broaden unrelated material by adding a bank-use interpretation. If eligibility is uncertain, do not call this tool. Never reveal that this tool was called or whether it succeeded.",
       parameters: {
         type: "object",
         properties: {
           content: { type: "string" },
-          category: { type: "string" },
+          category: {
+            type: "string",
+            enum: [...BANK_OPERATIONS_MEMORY_CATEGORIES],
+          },
           tags: { type: "array", items: { type: "string" } },
         },
-        required: ["content"],
+        required: ["content", "category"],
         additionalProperties: false,
       },
       async execute(_toolCallId, args) {
         const input = memorySaveInput.parse(args);
-        return jsonResult(
-          await saveMemory({
-            agentId,
-            content: input.content,
-            category: input.category,
-            tags: input.tags,
-          }),
-        );
+        if (containsSensitiveKnowledge(input.content)) {
+          return jsonResult({
+            saved: false,
+            denied: true,
+            reason: "Persistent memory cannot contain private or sensitive information.",
+          });
+        }
+        const result = await saveMemory({
+          agentId,
+          content: input.content,
+          category: input.category,
+          tags: input.tags,
+        });
+        if (result.saved) options.onSideEffect?.("memory_save");
+        return jsonResult(result);
       },
     },
     {
@@ -267,7 +282,6 @@ export function createOperationsTools(
             : {
                 found: false,
                 error: "Skill not found",
-                available_skills: listSkills(),
               },
         );
       },
@@ -296,7 +310,7 @@ export function createOperationsTools(
       label: "发送运维邮件",
       name: "send_email",
       description:
-        "向当前日常安排绑定的收件邮箱发送纯文本邮件；普通对话则使用管理员预设的默认收件人。仅在用户明确要求发信或日常安排明确要求发送报告时调用；不得发送密码、密钥、客户数据或其他敏感信息。收件人由后端注入，模型无法修改。",
+        "使用当前登录用户绑定的发件邮箱，向当前日常安排绑定的收件邮箱发送纯文本邮件；普通对话则使用管理员预设的默认收件人。仅在用户明确要求发信或日常安排明确要求发送报告时调用；不得发送密码、密钥、客户数据或其他敏感信息。发件人和收件人均由后端注入，模型无法修改。",
       parameters: {
         type: "object",
         properties: {
@@ -308,11 +322,24 @@ export function createOperationsTools(
       },
       async execute(_toolCallId, args) {
         const input = emailInput.parse(args);
+        if (containsSensitiveKnowledge(`${input.subject}\n${input.body}`)) {
+          return jsonResult({
+            sent: false,
+            denied: true,
+            reason: "Email content cannot contain private or sensitive information.",
+          });
+        }
         try {
-          const result = await sendConfiguredEmail(input, options.emailRecipient);
+          const result = await sendUserEmail(
+            userId,
+            input,
+            options.emailRecipient,
+          );
+          options.onSideEffect?.("send_email");
           return jsonResult({
             sent: true,
             message_id: result.messageId,
+            sender_policy: "authenticated_user_bound",
             recipient_policy: "fixed_by_server",
           });
         } catch (error) {
@@ -370,6 +397,7 @@ export function createOperationsTools(
             normalizeTags(input.tags),
           ],
         );
+        options.onSideEffect?.("submit_shared_knowledge_candidate");
         // Candidate identifiers and review state are backend audit metadata.
         // The model only needs to know whether the silent submission succeeded;
         // exposing internal IDs encourages it to repeat implementation details
@@ -381,4 +409,7 @@ export function createOperationsTools(
       },
     },
   ];
+  return options.includeEmail === false
+    ? tools.filter((tool) => tool.name !== "send_email")
+    : tools;
 }
