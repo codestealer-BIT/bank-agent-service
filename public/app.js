@@ -101,6 +101,7 @@
   let datacenters = [];
   let vendors = [];
   let searchTimer = null;
+  let infrastructureRefreshTimer = null;
   let conversationId = null;
   let creatingConversation = false;
   let conversations = [];
@@ -529,6 +530,8 @@
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
+      hour12: false,
+      timeZone: "Asia/Shanghai",
     });
   };
 
@@ -1221,8 +1224,7 @@
       memory.append(metricCell(machine.memory_percent, machine.status));
       const heartbeat = document.createElement("td");
       heartbeat.className = "heartbeat-cell";
-      heartbeat.textContent =
-        machine.status === "offline" ? "超过 1 小时" : relativeTime(machine.last_heartbeat);
+      heartbeat.textContent = `${formatAbsolute(machine.last_heartbeat)}（北京时间）`;
 
       row.append(statusCell, ...cells, cpu, memory, heartbeat);
       machineRows.append(row);
@@ -2138,6 +2140,17 @@
       skills = [];
     });
     await showPage(currentPage);
+    if (!infrastructureRefreshTimer) {
+      infrastructureRefreshTimer = window.setInterval(() => {
+        if (
+          currentUser &&
+          currentPage === "infrastructure" &&
+          document.visibilityState === "visible"
+        ) {
+          void loadInfrastructure();
+        }
+      }, 60_000);
+    }
     if (currentPage === "assistant" && assistantView === "chat") {
       const restoredConversationId = window.sessionStorage.getItem(conversationStateKey);
       if (
@@ -2151,6 +2164,10 @@
 
   function showLogin() {
     currentUser = null;
+    if (infrastructureRefreshTimer) {
+      window.clearInterval(infrastructureRefreshTimer);
+      infrastructureRefreshTimer = null;
+    }
     authGate.hidden = false;
     appShell.hidden = true;
     conversations = [];

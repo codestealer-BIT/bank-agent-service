@@ -48,6 +48,80 @@ different model responses. A turn also stops failover after a successful email,
 memory write, or knowledge-candidate submission so that replay cannot duplicate
 an external side effect.
 
+## Minute-level infrastructure simulation and alert mail
+
+The demo advances all machine CPU, memory, status, and heartbeat values once per
+minute. Heartbeats are stored as ISO timestamps and displayed in Beijing time.
+Healthy values follow a bounded random walk. By default, a new warning or
+offline incident is generated with probability `0.04` per minute (about 1.2
+machines per 30 minutes on average), and no more than two incidents can be
+active at once.
+
+Only transitions into `warning` or `offline` enqueue mail. Continuing incidents
+do not send repeated messages. Offline status requires three consecutive missed
+minute heartbeats. A 15-minute cooldown merges nearby transitions,
+with at most three machines in one email. The subject names the affected hosts;
+the body includes the frozen CPU/memory/heartbeat snapshot, a diagnosis enriched
+with shared bank-operations memory, safe checks, and maintenance-vendor contact
+details. If model or memory retrieval is temporarily unavailable, a conservative
+rule-based diagnosis is sent instead.
+
+```dotenv
+INFRA_MONITOR_ENABLED=true
+INFRA_MONITOR_INTERVAL_MS=60000
+INFRA_INCIDENT_CHANCE_PER_MINUTE=0.04
+INFRA_MULTIPLE_INCIDENT_CHANCE=0.12
+INFRA_MAX_ACTIVE_INCIDENTS=2
+INFRA_ALERT_EMAIL_COOLDOWN_MS=900000
+INFRA_ALERT_RECIPIENT=813624374@qq.com
+INFRA_ALERT_USER_ID=demo-user-a
+```
+
+Automatic alert mail uses the configured User A mailbox authorization. SMTP
+must be enabled and that account must have a valid QQ Mail authorization code.
+
+## Langfuse model traces
+
+Docker Compose runs a repository-local LiteLLM proxy between Letta and the
+existing upstream model gateway:
+
+```text
+Letta -> local LiteLLM -> LITELLM_BASE_URL -> model
+```
+
+The local proxy forwards every requested model name, including failover models,
+and sends model-call traces to Langfuse through LiteLLM's OpenTelemetry v2
+`langfuse_otel` preset. Add the Langfuse project credentials to `.env` before
+starting the stack:
+
+```dotenv
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=https://cloud.langfuse.com
+```
+
+The proxy is available only inside the Compose network and the API waits for
+its health check before starting. Inspect it with:
+
+```powershell
+docker compose ps litellm
+docker compose logs -f litellm
+```
+
+[litellm-config.yaml](litellm-config.yaml) enables message logging and the proxy
+uses OpenTelemetry `span_only` content capture, so Langfuse generations include
+prompts, responses, and tool-call payloads. Do not use real customer data or
+credentials unless the Langfuse deployment and its retention/access controls
+are approved for that data. The primary `MiniMax-M3` deployment has explicit
+per-token pricing copied from the upstream LiteLLM `/model/info` response so
+streamed generations report cost. Re-check these rates when the upstream
+deployment changes; fallback or custom model aliases still require their own
+upstream-specific pricing before their cost is reliable. This first integration
+produces model-call traces; it does not
+yet create the application-level Agent/Turn/Tool hierarchy. The local proxy also
+has retries disabled so the existing application failover policy remains
+authoritative.
+
 ## Start
 
 ```powershell

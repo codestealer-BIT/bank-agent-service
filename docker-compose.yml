@@ -14,7 +14,7 @@ services:
       REDIS_URL: redis://redis:6379
       LETTA_LOCAL_BACKEND_EXPERIMENTAL: "1"
       LETTA_LOCAL_BACKEND_DIR: /data/local-backend
-      LMSTUDIO_BASE_URL: ${LITELLM_BASE_URL:?Set LITELLM_BASE_URL in .env}
+      LMSTUDIO_BASE_URL: http://litellm:4000/v1
       LMSTUDIO_API_KEY: ${LITELLM_API_KEY:?Set LITELLM_API_KEY in .env}
       AGENT_MODEL: lmstudio/${LITELLM_MODEL:-MiniMax-M3}
       AGENT_FALLBACK_MODELS: ${LITELLM_FALLBACK_MODELS:-Kimi-K3,GLM-5.2,Kimi-K2.7-Code}
@@ -31,6 +31,14 @@ services:
       MEMORY_REFLECTION_ENABLED: ${MEMORY_REFLECTION_ENABLED:-true}
       MEMORY_REFLECTION_POLL_MS: ${MEMORY_REFLECTION_POLL_MS:-300000}
       MEMORY_REFLECTION_BATCH_SIZE: ${MEMORY_REFLECTION_BATCH_SIZE:-12}
+      INFRA_MONITOR_ENABLED: ${INFRA_MONITOR_ENABLED:-true}
+      INFRA_MONITOR_INTERVAL_MS: ${INFRA_MONITOR_INTERVAL_MS:-60000}
+      INFRA_INCIDENT_CHANCE_PER_MINUTE: ${INFRA_INCIDENT_CHANCE_PER_MINUTE:-0.04}
+      INFRA_MULTIPLE_INCIDENT_CHANCE: ${INFRA_MULTIPLE_INCIDENT_CHANCE:-0.12}
+      INFRA_MAX_ACTIVE_INCIDENTS: ${INFRA_MAX_ACTIVE_INCIDENTS:-2}
+      INFRA_ALERT_EMAIL_COOLDOWN_MS: ${INFRA_ALERT_EMAIL_COOLDOWN_MS:-900000}
+      INFRA_ALERT_RECIPIENT: ${INFRA_ALERT_RECIPIENT:-813624374@qq.com}
+      INFRA_ALERT_USER_ID: ${INFRA_ALERT_USER_ID:-demo-user-a}
       RAG_EMBEDDING_BASE_URL: ${RAG_EMBEDDING_BASE_URL:-http://embeddings:80}
       RAG_EMBEDDING_API_KEY: ${RAG_EMBEDDING_API_KEY:-}
       RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-BAAI/bge-m3}
@@ -69,6 +77,8 @@ services:
         condition: service_healthy
       embeddings:
         condition: service_started
+      litellm:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -86,6 +96,41 @@ services:
     cap_drop:
       - ALL
     mem_limit: 3g
+
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.94.1
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      UPSTREAM_LITELLM_BASE_URL: ${LITELLM_BASE_URL:?Set LITELLM_BASE_URL in .env}
+      UPSTREAM_LITELLM_API_KEY: ${LITELLM_API_KEY:?Set LITELLM_API_KEY in .env}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:?Set LANGFUSE_PUBLIC_KEY in .env}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:?Set LANGFUSE_SECRET_KEY in .env}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LITELLM_OTEL_V2: "true"
+      OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: span_only
+      OTEL_SERVICE_NAME: bank-agent-litellm
+    volumes:
+      - ./litellm-config.yaml:/app/config.yaml:ro
+    expose:
+      - "4000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1g
 
   postgres:
     image: pgvector/pgvector:pg16

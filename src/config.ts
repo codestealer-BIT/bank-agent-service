@@ -72,6 +72,33 @@ const envSchema = z.object({
     .positive()
     .default(300_000),
   MEMORY_REFLECTION_BATCH_SIZE: z.coerce.number().int().positive().default(12),
+  INFRA_MONITOR_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  INFRA_MONITOR_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(10_000)
+    .default(60_000),
+  INFRA_INCIDENT_CHANCE_PER_MINUTE: z.coerce
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.04),
+  INFRA_MULTIPLE_INCIDENT_CHANCE: z.coerce
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.12),
+  INFRA_MAX_ACTIVE_INCIDENTS: z.coerce.number().int().min(1).max(5).default(2),
+  INFRA_ALERT_EMAIL_COOLDOWN_MS: z.coerce
+    .number()
+    .int()
+    .min(60_000)
+    .default(900_000),
+  INFRA_ALERT_RECIPIENT: optionalEmail.default("813624374@qq.com"),
+  INFRA_ALERT_USER_ID: z.string().trim().min(1).default("demo-user-a"),
   RAG_EMBEDDING_BASE_URL: z
     .string()
     .url()

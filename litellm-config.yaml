@@ -1,0 +1,39 @@
+model_list:
+  # The wildcard proxy deployment reports zero configured pricing, which makes
+  # LiteLLM's streaming callback emit cost=0 even when the final chunk contains
+  # token usage. Give the primary model an exact deployment with explicit
+  # per-token pricing so streaming Langfuse generations receive a real cost.
+  # Rates mirror the upstream LiteLLM `/model/info` values exposed to the
+  # configured API key. Re-check them if the upstream deployment changes.
+  - model_name: "MiniMax-M3"
+    litellm_params:
+      model: "litellm_proxy/MiniMax-M3"
+      api_base: os.environ/UPSTREAM_LITELLM_BASE_URL
+      api_key: os.environ/UPSTREAM_LITELLM_API_KEY
+    model_info:
+      input_cost_per_token: 0.0000006
+      output_cost_per_token: 0.0000024
+      cache_read_input_token_cost: 0.0000006
+
+  # Preserve the model name requested by Letta and forward it to the existing
+  # OpenAI-compatible LiteLLM gateway. This also covers configured fallbacks.
+  - model_name: "*"
+    litellm_params:
+      model: "litellm_proxy/*"
+      api_base: os.environ/UPSTREAM_LITELLM_BASE_URL
+      api_key: os.environ/UPSTREAM_LITELLM_API_KEY
+
+litellm_settings:
+  # Langfuse 4's Tracing UI consumes OTLP events. The legacy `langfuse`
+  # success/failure callback creates records visible through the old API but
+  # not through the current events.byTraceId UI path.
+  callbacks: ["langfuse_otel"]
+  # Message content is explicitly enabled so Langfuse generations include the
+  # prompt, response, and tool-call payloads as well as model/usage metadata.
+  turn_off_message_logging: false
+  log_raw_request_response: false
+
+router_settings:
+  # Retry and fallback stay owned by bank-agent-service and the upstream
+  # gateway; this observability hop must not multiply requests.
+  num_retries: 0

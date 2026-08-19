@@ -12,6 +12,10 @@ import {
   stopMemoryReflectionWorker,
 } from "./memory-reflection-service.js";
 import { startScheduleWorker, stopScheduleWorker } from "./schedule-service.js";
+import {
+  startInfrastructureMonitor,
+  stopInfrastructureMonitor,
+} from "./infrastructure-monitor.js";
 
 const app = Fastify({
   logger: {
@@ -67,11 +71,13 @@ await redis.ping();
 await pool.query("SELECT 1");
 startScheduleWorker();
 startMemoryReflectionWorker();
+startInfrastructureMonitor();
 
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, "shutting down");
   stopScheduleWorker();
   stopMemoryReflectionWorker();
+  stopInfrastructureMonitor();
   await app.close();
   await Promise.all([closeDatabase(), closeRedis()]);
   process.exit(0);

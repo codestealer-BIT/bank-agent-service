@@ -24,6 +24,20 @@ export type Machine = {
   last_heartbeat: string;
 };
 
+export type MachineTransition = {
+  machine: Machine;
+  previous_status: MachineStatus;
+  occurred_at: string;
+};
+
+export type InfrastructureSimulationOptions = {
+  now?: Date;
+  random?: () => number;
+  incidentChancePerMinute?: number;
+  multipleIncidentChance?: number;
+  maxActiveIncidents?: number;
+};
+
 export type VendorContact = {
   id: string;
   name: string;
@@ -180,12 +194,7 @@ function buildMachines(): Machine[] {
       const roleIndex = (index - 1) % roles.length;
       const vendorId = roleVendorIds[roleIndex];
       const vendor = maintenanceVendors.find((item) => item.id === vendorId)!;
-      const status: MachineStatus =
-        index === 8 && dcIndex % 2 === 0
-          ? "offline"
-          : index === 4 || (index === 7 && dcIndex === 1)
-            ? "warning"
-            : "healthy";
+      const status: MachineStatus = "healthy";
       const subnet = 20 + dcIndex;
       machines.push({
         id: `${datacenter.id}-host-${String(index).padStart(2, "0")}`,
@@ -208,25 +217,9 @@ function buildMachines(): Machine[] {
         role: roles[roleIndex],
         os: systems[(index + dcIndex) % systems.length],
         status,
-        cpu_percent:
-          status === "offline"
-            ? 0
-            : status === "warning"
-              ? 86 + index
-              : 18 + ((index * 9 + dcIndex * 7) % 52),
-        memory_percent:
-          status === "offline"
-            ? 0
-            : status === "warning"
-              ? 78 + index
-              : 31 + ((index * 7 + dcIndex * 5) % 43),
-        last_heartbeat:
-          status === "offline"
-            ? "2026-07-16T01:20:00.000Z"
-            : new Date(
-                Date.parse("2026-07-16T03:00:00.000Z") -
-                  (index + dcIndex) * 31_000,
-              ).toISOString(),
+        cpu_percent: 18 + ((index * 9 + dcIndex * 7) % 52),
+        memory_percent: 31 + ((index * 7 + dcIndex * 5) % 43),
+        last_heartbeat: new Date().toISOString(),
       });
     }
   });
@@ -234,6 +227,170 @@ function buildMachines(): Machine[] {
 }
 
 export const machines = buildMachines();
+
+type ActiveIncident = {
+  status: Exclude<MachineStatus, "healthy">;
+  remainingTicks: number;
+  pressure: "cpu" | "memory" | "both";
+  missedHeartbeatTicks: number;
+};
+
+const activeIncidents = new Map<string, ActiveIncident>();
+
+function clampMetric(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(maximum, Math.round(value)));
+}
+
+function randomStep(random: () => number, magnitude: number): number {
+  return (random() * 2 - 1) * magnitude;
+}
+
+function updateMachineMetrics(
+  machine: Machine,
+  incident: ActiveIncident | undefined,
+  now: Date,
+  random: () => number,
+): void {
+  if (!incident) {
+    machine.status = "healthy";
+    machine.cpu_percent = clampMetric(
+      machine.cpu_percent + randomStep(random, 7),
+      12,
+      72,
+    );
+    machine.memory_percent = clampMetric(
+      machine.memory_percent + randomStep(random, 4),
+      26,
+      76,
+    );
+    machine.last_heartbeat = now.toISOString();
+    return;
+  }
+
+  machine.status = incident.status;
+  if (incident.status === "offline") {
+    machine.cpu_percent = 0;
+    machine.memory_percent = 0;
+    return;
+  }
+
+  const cpuUnderPressure = incident.pressure !== "memory";
+  const memoryUnderPressure = incident.pressure !== "cpu";
+  machine.cpu_percent = cpuUnderPressure
+    ? clampMetric(86 + randomStep(random, 9), 80, 99)
+    : clampMetric(machine.cpu_percent + randomStep(random, 5), 38, 78);
+  machine.memory_percent = memoryUnderPressure
+    ? clampMetric(88 + randomStep(random, 8), 80, 99)
+    : clampMetric(machine.memory_percent + randomStep(random, 4), 42, 78);
+  machine.last_heartbeat = now.toISOString();
+}
+
+function startIncident(
+  machine: Machine,
+  now: Date,
+  random: () => number,
+): MachineTransition | undefined {
+  const status: ActiveIncident["status"] =
+    random() < 0.78 ? "warning" : "offline";
+  const incident: ActiveIncident = {
+    status,
+    remainingTicks:
+      status === "warning"
+        ? 8 + Math.floor(random() * 9)
+        : 5 + Math.floor(random() * 8),
+    pressure:
+      random() < 0.42 ? "cpu" : random() < 0.72 ? "memory" : "both",
+    missedHeartbeatTicks: status === "offline" ? 1 : 0,
+  };
+  const previousStatus = machine.status;
+  activeIncidents.set(machine.id, incident);
+  if (status === "offline") {
+    // Treat the injected outage as the first missed sample. The machine is
+    // declared offline only after three consecutive minute heartbeats are
+    // absent, avoiding a one-sample flap and noisy email.
+    machine.last_heartbeat = new Date(now.getTime() - 60_000).toISOString();
+    return undefined;
+  }
+  updateMachineMetrics(machine, incident, now, random);
+  return {
+    machine: { ...machine },
+    previous_status: previousStatus,
+    occurred_at: now.toISOString(),
+  };
+}
+
+/**
+ * Advance the demo fleet by one minute. Healthy metrics use a bounded random
+ * walk, heartbeats are refreshed on the supplied clock, and only a small,
+ * capped number of incidents can be active at once.
+ */
+export function advanceInfrastructureSimulation(
+  options: InfrastructureSimulationOptions = {},
+): MachineTransition[] {
+  const now = options.now ?? new Date();
+  const random = options.random ?? Math.random;
+  const maxActiveIncidents = options.maxActiveIncidents ?? 2;
+  const transitions: MachineTransition[] = [];
+
+  for (const machine of machines) {
+    const incident = activeIncidents.get(machine.id);
+    if (incident) {
+      incident.remainingTicks -= 1;
+      if (incident.remainingTicks <= 0) {
+        activeIncidents.delete(machine.id);
+        updateMachineMetrics(machine, undefined, now, random);
+      } else if (
+        incident.status === "offline" &&
+        incident.missedHeartbeatTicks < 3
+      ) {
+        incident.missedHeartbeatTicks += 1;
+        if (incident.missedHeartbeatTicks === 3) {
+          const previousStatus = machine.status;
+          updateMachineMetrics(machine, incident, now, random);
+          transitions.push({
+            machine: { ...machine },
+            previous_status: previousStatus,
+            occurred_at: now.toISOString(),
+          });
+        }
+      } else {
+        updateMachineMetrics(machine, incident, now, random);
+      }
+    } else {
+      updateMachineMetrics(machine, undefined, now, random);
+    }
+  }
+
+  const availableSlots = Math.max(0, maxActiveIncidents - activeIncidents.size);
+  if (
+    availableSlots === 0 ||
+    random() >= (options.incidentChancePerMinute ?? 0.04)
+  ) {
+    return transitions;
+  }
+
+  const desiredCount =
+    availableSlots > 1 && random() < (options.multipleIncidentChance ?? 0.12)
+      ? 2
+      : 1;
+  for (let index = 0; index < desiredCount; index += 1) {
+    const candidates = machines.filter(
+      (machine) => !activeIncidents.has(machine.id),
+    );
+    if (!candidates.length) break;
+    const machine = candidates[Math.floor(random() * candidates.length)];
+    const transition = startIncident(machine, now, random);
+    if (transition) transitions.push(transition);
+  }
+  return transitions;
+}
+
+export function resetInfrastructureSimulation(now = new Date()): void {
+  activeIncidents.clear();
+  const baseline = buildMachines();
+  machines.splice(0, machines.length, ...baseline);
+  for (const machine of machines) machine.last_heartbeat = now.toISOString();
+}
 
 export type MachineFilter = {
   datacenterIds?: string[];
